@@ -3760,8 +3760,10 @@ func (js *jetStream) createGroupForStream(ci *ClientInfo, cfg *StreamConfig) *ra
 }
 
 func (js *jetStream) haExceeded(acc string, limit int) bool {
-	if limit <= 0 {
+	if limit < 0 {
 		return false
+	} else if limit == 0 {
+		return true
 	}
 	js.mu.RLock()
 	defer js.mu.RUnlock()
@@ -3817,7 +3819,7 @@ func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject,
 	cfg := &ccfg
 
 	if config.Replicas > 1 && js.haExceeded(accName, accHaLim) {
-		resp.Error = NewJSNotEnabledForAccountError()
+		resp.Error = NewJSAccountHaLimitExceededError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
 		return
 	}
@@ -4545,7 +4547,7 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 	var resp = JSApiConsumerCreateResponse{ApiResponse: ApiResponse{Type: JSApiConsumerCreateResponseType}}
 
 	if cfg.Durable != _EMPTY_ && js.haExceeded(accName, accHaLim) {
-		resp.Error = NewJSNotEnabledForAccountError()
+		resp.Error = NewJSAccountHaLimitExceededError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
 		return
 	}
