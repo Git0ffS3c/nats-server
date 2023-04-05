@@ -22,7 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -102,6 +102,7 @@ func TestOCSPAlwaysMustStapleAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -199,6 +200,7 @@ func TestOCSPMustStapleShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -253,7 +255,6 @@ func TestOCSPMustStapleAutoDoesNotShutdown(t *testing.T) {
 		}
 	`
 	conf := createConfFile(t, []byte(content))
-	defer removeFile(t, conf)
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
@@ -535,7 +536,6 @@ func TestOCSPClient(t *testing.T) {
 			test.configure()
 			content := test.config
 			conf := createConfFile(t, []byte(content))
-			defer removeFile(t, conf)
 			s, opts := RunServerWithConfig(conf)
 			defer s.Shutdown()
 
@@ -593,7 +593,6 @@ func TestOCSPReloadRotateTLSCertWithNoURL(t *testing.T) {
 		}
 	`
 	conf := createConfFile(t, []byte(content))
-	defer removeFile(t, conf)
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
@@ -616,6 +615,7 @@ func TestOCSPReloadRotateTLSCertWithNoURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -641,7 +641,7 @@ func TestOCSPReloadRotateTLSCertWithNoURL(t *testing.T) {
 			timeout: 5
 		}
 	`
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	// Reload show warning because of cert missing OCSP Url so cannot be used
@@ -684,13 +684,12 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	addr := fmt.Sprintf("http://%s", ocspr.Addr)
 	setOCSPStatus(t, addr, serverCert, ocsp.Good)
 
-	storeDir := createDir(t, "_ocsp")
-	defer removeDir(t, storeDir)
+	storeDir := t.TempDir()
 
 	originalContent := `
 		port: -1
 
-		store_dir: "%s"
+		store_dir: '%s'
 
 		tls {
 			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
@@ -702,7 +701,6 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 
 	content := fmt.Sprintf(originalContent, storeDir)
 	conf := createConfFile(t, []byte(content))
-	defer removeFile(t, conf)
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
@@ -727,6 +725,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -753,7 +752,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	}
 	found := false
 	for _, file := range files {
-		data, err := ioutil.ReadFile(file)
+		data, err := os.ReadFile(file)
 		if err != nil {
 			t.Error(err)
 		}
@@ -769,7 +768,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	updatedContent := `
 		port: -1
 
-		store_dir: "%s"
+		store_dir: '%s'
 
 		tls {
 			cert_file: "configs/certs/ocsp/server-cert.pem"
@@ -779,7 +778,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 		}
 	`
 	content = fmt.Sprintf(updatedContent, storeDir)
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -808,7 +807,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 
 	// Re-enable OCSP Stapling
 	content = fmt.Sprintf(originalContent, storeDir)
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -852,7 +851,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	}
 	found = false
 	for _, file := range files {
-		data, err := ioutil.ReadFile(file)
+		data, err := os.ReadFile(file)
 		if err != nil {
 			t.Error(err)
 		}
@@ -895,7 +894,6 @@ func TestOCSPReloadRotateTLSCertEnableMustStaple(t *testing.T) {
 		}
 	`
 	conf := createConfFile(t, []byte(content))
-	defer removeFile(t, conf)
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
@@ -914,6 +912,7 @@ func TestOCSPReloadRotateTLSCertEnableMustStaple(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -938,7 +937,7 @@ func TestOCSPReloadRotateTLSCertEnableMustStaple(t *testing.T) {
 			timeout: 5
 		}
 	`
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -990,12 +989,9 @@ func TestOCSPCluster(t *testing.T) {
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-08-cert.pem", ocsp.Good)
 
 	// Store Dirs
-	storeDirA := createDir(t, "_ocspA")
-	defer removeDir(t, storeDirA)
-	storeDirB := createDir(t, "_ocspB")
-	defer removeDir(t, storeDirB)
-	storeDirC := createDir(t, "_ocspC")
-	defer removeDir(t, storeDirC)
+	storeDirA := t.TempDir()
+	storeDirB := t.TempDir()
+	storeDirC := t.TempDir()
 
 	// Seed server configuration
 	srvConfA := `
@@ -1010,7 +1006,7 @@ func TestOCSPCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		cluster {
 			name: AB
 			host: "127.0.0.1"
@@ -1027,7 +1023,6 @@ func TestOCSPCluster(t *testing.T) {
 	`
 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
 	sconfA := createConfFile(t, []byte(srvConfA))
-	defer removeFile(t, sconfA)
 	srvA, optsA := RunServerWithConfig(sconfA)
 	defer srvA.Shutdown()
 
@@ -1044,7 +1039,7 @@ func TestOCSPCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		cluster {
 			name: AB
 			host: "127.0.0.1"
@@ -1064,7 +1059,6 @@ func TestOCSPCluster(t *testing.T) {
 	`
 	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.Cluster.Port)
 	conf := createConfFile(t, []byte(srvConfB))
-	defer removeFile(t, conf)
 	srvB, optsB := RunServerWithConfig(conf)
 	defer srvB.Shutdown()
 
@@ -1111,7 +1105,7 @@ func TestOCSPCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		cluster {
 			name: AB
 			host: "127.0.0.1"
@@ -1131,7 +1125,6 @@ func TestOCSPCluster(t *testing.T) {
 	`
 	srvConfC = fmt.Sprintf(srvConfC, storeDirC, optsA.Cluster.Port)
 	conf = createConfFile(t, []byte(srvConfC))
-	defer removeFile(t, conf)
 	srvC, optsC := RunServerWithConfig(conf)
 	defer srvC.Shutdown()
 
@@ -1206,7 +1199,7 @@ func TestOCSPCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		cluster {
 			port: -1
 			name: AB
@@ -1223,7 +1216,7 @@ func TestOCSPCluster(t *testing.T) {
 		}
 	`
 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
-	if err := ioutil.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
+	if err := os.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := srvA.Reload(); err != nil {
@@ -1262,14 +1255,12 @@ func TestOCSPLeaf(t *testing.T) {
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-06-cert.pem", ocsp.Good)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-07-cert.pem", ocsp.Good)
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-08-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/client-cert.pem", ocsp.Good)
 
 	// Store Dirs
-	storeDirA := createDir(t, "_ocspA")
-	defer removeDir(t, storeDirA)
-	storeDirB := createDir(t, "_ocspB")
-	defer removeDir(t, storeDirB)
-	storeDirC := createDir(t, "_ocspC")
-	defer removeDir(t, storeDirC)
+	storeDirA := t.TempDir()
+	storeDirB := t.TempDir()
+	storeDirC := t.TempDir()
 
 	// LeafNode server configuration
 	srvConfA := `
@@ -1284,7 +1275,8 @@ func TestOCSPLeaf(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
+
 		leafnodes {
 			host: "127.0.0.1"
 			port: -1
@@ -1295,16 +1287,18 @@ func TestOCSPLeaf(t *testing.T) {
 				key_file: "configs/certs/ocsp/server-status-request-url-02-key.pem"
 				ca_file: "configs/certs/ocsp/ca-cert.pem"
 				timeout: 5
+				# Leaf connection must present certs.
+				verify: true
 			}
 		}
 	`
 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
 	sconfA := createConfFile(t, []byte(srvConfA))
-	defer removeFile(t, sconfA)
 	srvA, optsA := RunServerWithConfig(sconfA)
 	defer srvA.Shutdown()
 
-	// LeafNode that has the original as a remote.
+	// LeafNode that has the original as a remote and running
+	// without OCSP Stapling for the leaf remote.
 	srvConfB := `
 		host: "127.0.0.1"
 		port: -1
@@ -1317,13 +1311,15 @@ func TestOCSPLeaf(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
+
 		leafnodes {
 			remotes: [ {
 				url: "tls://127.0.0.1:%d"
 				tls {
-					cert_file: "configs/certs/ocsp/server-status-request-url-04-cert.pem"
-					key_file: "configs/certs/ocsp/server-status-request-url-04-key.pem"
+					# Cert without OCSP Stapling enabled is able to connect.
+					cert_file: "configs/certs/ocsp/client-cert.pem"
+					key_file: "configs/certs/ocsp/client-key.pem"
 					ca_file: "configs/certs/ocsp/ca-cert.pem"
 					timeout: 5
 				}
@@ -1332,7 +1328,6 @@ func TestOCSPLeaf(t *testing.T) {
 	`
 	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.LeafNode.Port)
 	conf := createConfFile(t, []byte(srvConfB))
-	defer removeFile(t, conf)
 	srvB, optsB := RunServerWithConfig(conf)
 	defer srvB.Shutdown()
 
@@ -1353,19 +1348,19 @@ func TestOCSPLeaf(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cA.Close()
-	// checkLeafNodeConnected(t, srvA)
+	checkLeafNodeConnected(t, srvA)
 
 	// Revoke the seed server cluster certificate, following servers will not be able to verify connection.
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Revoked)
 
-	// Original set of servers still can communicate to each other, even though the cert has been revoked.
-	// checkLeafNodeConnected(t, srvA)
+	// Original set of servers still can communicate to each other via leafnode, even though the staple
+	// for the leaf server has been revoked.
+	checkLeafNodeConnected(t, srvA)
 
-	// Wait for seed server to notice that its certificate has been revoked,
-	// so that new leafnodes can't connect to it.
+	// Wait for seed server to notice that its certificate has been revoked.
 	time.Sleep(6 * time.Second)
 
-	// Start another server against the seed server that has an invalid OCSP Staple
+	// Start another server against the seed server that has an revoked OCSP Staple.
 	srvConfC := `
 		host: "127.0.0.1"
 		port: -1
@@ -1378,7 +1373,7 @@ func TestOCSPLeaf(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		leafnodes {
 			remotes: [ {
 				url: "tls://127.0.0.1:%d"
@@ -1393,7 +1388,6 @@ func TestOCSPLeaf(t *testing.T) {
 	`
 	srvConfC = fmt.Sprintf(srvConfC, storeDirC, optsA.LeafNode.Port)
 	conf = createConfFile(t, []byte(srvConfC))
-	defer removeFile(t, conf)
 	srvC, optsC := RunServerWithConfig(conf)
 	defer srvC.Shutdown()
 
@@ -1430,7 +1424,8 @@ func TestOCSPLeaf(t *testing.T) {
 	}
 	defer cC.Close()
 
-	// There should be no connectivity between the clients due to the revoked staple.
+	// There should be connectivity between the clients even if there is a revoked staple
+	// from a leafnode connection.
 	_, err = cA.Subscribe("foo", func(m *nats.Msg) {
 		m.Respond(nil)
 	})
@@ -1445,13 +1440,13 @@ func TestOCSPLeaf(t *testing.T) {
 		t.Fatal(err)
 	}
 	cB.Flush()
-	resp, err := cC.Request("foo", nil, 2*time.Second)
-	if err == nil {
-		t.Errorf("Unexpected success, response: %+v", resp)
+	_, err = cC.Request("foo", nil, 2*time.Second)
+	if err != nil {
+		t.Errorf("Expected success, got: %+v", err)
 	}
-	resp, err = cC.Request("bar", nil, 2*time.Second)
-	if err == nil {
-		t.Errorf("Unexpected success, response: %+v", resp)
+	_, err = cC.Request("bar", nil, 2*time.Second)
+	if err != nil {
+		t.Errorf("Expected success, got: %+v", err)
 	}
 
 	// Switch the certs from the leafnode server to new ones that are not revoked,
@@ -1468,7 +1463,7 @@ func TestOCSPLeaf(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		leafnodes {
 			host: "127.0.0.1"
 			port: -1
@@ -1479,11 +1474,12 @@ func TestOCSPLeaf(t *testing.T) {
 				key_file: "configs/certs/ocsp/server-status-request-url-08-key.pem"
 				ca_file: "configs/certs/ocsp/ca-cert.pem"
 				timeout: 5
+				verify: true
 			}
 		}
 	`
 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
-	if err := ioutil.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
+	if err := os.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := srvA.Reload(); err != nil {
@@ -1515,6 +1511,508 @@ func TestOCSPLeaf(t *testing.T) {
 	}
 }
 
+func TestOCSPLeafNoVerify(t *testing.T) {
+	const (
+		caCert = "configs/certs/ocsp/ca-cert.pem"
+		caKey  = "configs/certs/ocsp/ca-key.pem"
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ocspr := newOCSPResponder(t, caCert, caKey)
+	defer ocspr.Shutdown(ctx)
+	addr := fmt.Sprintf("http://%s", ocspr.Addr)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-03-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-04-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-05-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-06-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-07-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-08-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/client-cert.pem", ocsp.Good)
+
+	// Store Dirs
+	storeDirA := t.TempDir()
+	storeDirB := t.TempDir()
+	storeDirC := t.TempDir()
+
+	// LeafNode server configuration
+	srvConfA := `
+		host: "127.0.0.1"
+		port: -1
+
+		server_name: "AAA"
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+		}
+		store_dir: '%s'
+
+		leafnodes {
+			host: "127.0.0.1"
+			port: -1
+			advertise: "127.0.0.1"
+
+			tls {
+				cert_file: "configs/certs/ocsp/server-status-request-url-02-cert.pem"
+				key_file: "configs/certs/ocsp/server-status-request-url-02-key.pem"
+				ca_file: "configs/certs/ocsp/ca-cert.pem"
+				timeout: 5
+				# Leaf server does not require certs for clients.
+				verify: false
+			}
+		}
+	`
+	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
+	sconfA := createConfFile(t, []byte(srvConfA))
+	srvA, optsA := RunServerWithConfig(sconfA)
+	defer srvA.Shutdown()
+
+	// LeafNode remote that will connect to A and will not present certs.
+	srvConfB := `
+		host: "127.0.0.1"
+		port: -1
+
+		server_name: "BBB"
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-03-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-03-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+		}
+		store_dir: '%s'
+
+		leafnodes {
+			remotes: [ {
+				url: "tls://127.0.0.1:%d"
+				tls {
+					ca_file: "configs/certs/ocsp/ca-cert.pem"
+					timeout: 5
+				}
+			} ]
+		}
+	`
+	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.LeafNode.Port)
+	conf := createConfFile(t, []byte(srvConfB))
+	srvB, optsB := RunServerWithConfig(conf)
+	defer srvB.Shutdown()
+
+	// Client connects to server A.
+	cA, err := nats.Connect(fmt.Sprintf("tls://127.0.0.1:%d", optsA.Port),
+		nats.Secure(&tls.Config{
+			VerifyConnection: func(s tls.ConnectionState) error {
+				if s.OCSPResponse == nil {
+					return fmt.Errorf("missing OCSP Staple from server")
+				}
+				return nil
+			},
+		}),
+		nats.RootCAs(caCert),
+		nats.ErrorHandler(noOpErrHandler),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cA.Close()
+	checkLeafNodeConnected(t, srvA)
+
+	// Revoke the seed server cluster certificate, following servers will not be able to verify connection.
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Revoked)
+
+	// Original set of servers still can communicate to each other, even though the cert has been revoked.
+	checkLeafNodeConnected(t, srvA)
+
+	// Wait for seed server to notice that its certificate has been revoked.
+	time.Sleep(6 * time.Second)
+
+	// Start another server against the seed server that has an revoked OCSP Staple.
+	srvConfC := `
+		host: "127.0.0.1"
+		port: -1
+
+		server_name: "CCC"
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-05-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-05-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+		}
+		store_dir: '%s'
+		leafnodes {
+			remotes: [ {
+				url: "tls://127.0.0.1:%d"
+				tls {
+					cert_file: "configs/certs/ocsp/server-status-request-url-06-cert.pem"
+					key_file: "configs/certs/ocsp/server-status-request-url-06-key.pem"
+					ca_file: "configs/certs/ocsp/ca-cert.pem"
+					timeout: 5
+					timeout: 5
+				}
+			} ]
+		}
+	`
+	srvConfC = fmt.Sprintf(srvConfC, storeDirC, optsA.LeafNode.Port)
+	conf = createConfFile(t, []byte(srvConfC))
+	srvC, optsC := RunServerWithConfig(conf)
+	defer srvC.Shutdown()
+
+	cB, err := nats.Connect(fmt.Sprintf("tls://127.0.0.1:%d", optsB.Port),
+		nats.Secure(&tls.Config{
+			VerifyConnection: func(s tls.ConnectionState) error {
+				if s.OCSPResponse == nil {
+					return fmt.Errorf("missing OCSP Staple from server")
+				}
+				return nil
+			},
+		}),
+		nats.RootCAs(caCert),
+		nats.ErrorHandler(noOpErrHandler),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cB.Close()
+	cC, err := nats.Connect(fmt.Sprintf("tls://127.0.0.1:%d", optsC.Port),
+		nats.Secure(&tls.Config{
+			VerifyConnection: func(s tls.ConnectionState) error {
+				if s.OCSPResponse == nil {
+					return fmt.Errorf("missing OCSP Staple from server")
+				}
+				return nil
+			},
+		}),
+		nats.RootCAs(caCert),
+		nats.ErrorHandler(noOpErrHandler),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cC.Close()
+
+	// There should be connectivity between the clients even if there is a revoked staple
+	// from a leafnode connection.
+	_, err = cA.Subscribe("foo", func(m *nats.Msg) {
+		m.Respond(nil)
+	})
+	if err != nil {
+		t.Errorf("%v", err)
+	}
+	cA.Flush()
+	_, err = cB.Subscribe("bar", func(m *nats.Msg) {
+		m.Respond(nil)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cB.Flush()
+	_, err = cC.Request("foo", nil, 2*time.Second)
+	if err != nil {
+		t.Errorf("Expected success, got: %+v", err)
+	}
+	_, err = cC.Request("bar", nil, 2*time.Second)
+	if err != nil {
+		t.Errorf("Expected success, got: %+v", err)
+	}
+
+	// Switch the certs from the leafnode server to new ones that are not revoked,
+	// this should restart OCSP Stapling for the leafnode server.
+	srvConfA = `
+		host: "127.0.0.1"
+		port: -1
+
+		server_name: "AAA"
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-07-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-07-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+		}
+		store_dir: '%s'
+		leafnodes {
+			host: "127.0.0.1"
+			port: -1
+			advertise: "127.0.0.1"
+
+			tls {
+				cert_file: "configs/certs/ocsp/server-status-request-url-08-cert.pem"
+				key_file: "configs/certs/ocsp/server-status-request-url-08-key.pem"
+				ca_file: "configs/certs/ocsp/ca-cert.pem"
+				timeout: 5
+				verify: true
+			}
+		}
+	`
+	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
+	if err := os.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
+		t.Fatalf("Error writing config: %v", err)
+	}
+	if err := srvA.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(4 * time.Second)
+
+	// A <-> A
+	_, err = cA.Request("foo", nil, 2*time.Second)
+	if err != nil {
+		t.Errorf("%v", err)
+	}
+
+	// B <-> A
+	_, err = cB.Request("foo", nil, 2*time.Second)
+	if err != nil {
+		t.Errorf("%v", err)
+	}
+
+	// C <-> A
+	_, err = cC.Request("foo", nil, 2*time.Second)
+	if err != nil {
+		t.Errorf("%v", err)
+	}
+	// C <-> B via leafnode A
+	_, err = cC.Request("bar", nil, 2*time.Second)
+	if err != nil {
+		t.Errorf("%v", err)
+	}
+}
+
+func TestOCSPLeafVerifyLeafRemote(t *testing.T) {
+	const (
+		caCert = "configs/certs/ocsp/ca-cert.pem"
+		caKey  = "configs/certs/ocsp/ca-key.pem"
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ocspr := newOCSPResponder(t, caCert, caKey)
+	defer ocspr.Shutdown(ctx)
+	addr := fmt.Sprintf("http://%s", ocspr.Addr)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-03-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-04-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-05-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-06-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-07-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-08-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/client-cert.pem", ocsp.Good)
+
+	// Store Dirs
+	storeDirA := t.TempDir()
+	storeDirB := t.TempDir()
+
+	// LeafNode server configuration
+	srvConfA := `
+		host: "127.0.0.1"
+		port: -1
+
+		server_name: "AAA"
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+		}
+		store_dir: '%s'
+
+		leafnodes {
+			host: "127.0.0.1"
+			port: -1
+			advertise: "127.0.0.1"
+
+			tls {
+				cert_file: "configs/certs/ocsp/server-status-request-url-02-cert.pem"
+				key_file: "configs/certs/ocsp/server-status-request-url-02-key.pem"
+				ca_file: "configs/certs/ocsp/ca-cert.pem"
+				timeout: 5
+				verify: true
+			}
+		}
+	`
+	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
+	sconfA := createConfFile(t, []byte(srvConfA))
+	srvA, optsA := RunServerWithConfig(sconfA)
+	defer srvA.Shutdown()
+
+	// LeafNode remote that will connect to A and will not present certs.
+	srvConfB := `
+		host: "127.0.0.1"
+		port: -1
+
+		server_name: "BBB"
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-03-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-03-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+		}
+		store_dir: '%s'
+
+		leafnodes {
+			remotes: [ {
+				url: "tls://127.0.0.1:%d"
+				tls {
+					ca_file: "configs/certs/ocsp/ca-cert.pem"
+					timeout: 5
+				}
+			} ]
+		}
+	`
+	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.LeafNode.Port)
+	conf := createConfFile(t, []byte(srvConfB))
+	srvB, _ := RunServerWithConfig(conf)
+	defer srvB.Shutdown()
+
+	// Client connects to server A.
+	cA, err := nats.Connect(fmt.Sprintf("tls://127.0.0.1:%d", optsA.Port),
+		nats.Secure(&tls.Config{
+			VerifyConnection: func(s tls.ConnectionState) error {
+				if s.OCSPResponse == nil {
+					return fmt.Errorf("missing OCSP Staple from server")
+				}
+				return nil
+			},
+		}),
+		nats.RootCAs(caCert),
+		nats.ErrorHandler(noOpErrHandler),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cA.Close()
+
+	// Should not have been able to connect.
+	checkLeafNodeConnections(t, srvA, 0)
+}
+
+func TestOCSPLeafVerifyAndMapLeafRemote(t *testing.T) {
+	const (
+		caCert = "configs/certs/ocsp/ca-cert.pem"
+		caKey  = "configs/certs/ocsp/ca-key.pem"
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ocspr := newOCSPResponder(t, caCert, caKey)
+	defer ocspr.Shutdown(ctx)
+	addr := fmt.Sprintf("http://%s", ocspr.Addr)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-01-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-02-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-03-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-04-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-05-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-06-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-07-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-08-cert.pem", ocsp.Good)
+	setOCSPStatus(t, addr, "configs/certs/ocsp/client-cert.pem", ocsp.Good)
+
+	// Store Dirs
+	storeDirA := t.TempDir()
+	storeDirB := t.TempDir()
+
+	// LeafNode server configuration
+	srvConfA := `
+		host: "127.0.0.1"
+		port: -1
+
+		server_name: "AAA"
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-01-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+			verify_and_map: true
+		}
+		store_dir: '%s'
+
+		leafnodes {
+			host: "127.0.0.1"
+			port: -1
+			advertise: "127.0.0.1"
+
+			tls {
+				cert_file: "configs/certs/ocsp/server-status-request-url-02-cert.pem"
+				key_file: "configs/certs/ocsp/server-status-request-url-02-key.pem"
+				ca_file: "configs/certs/ocsp/ca-cert.pem"
+				timeout: 5
+				verify_and_map: true
+			}
+		}
+
+		accounts: {
+			leaf: {
+			  users: [ {user: "C=US, ST=CA, L=San Francisco, O=Synadia, OU=nats.io, CN=localhost server-status-request-url-04"} ]
+			}
+			client: {
+			  users: [ {user: "C=US, ST=CA, L=San Francisco, O=Synadia, OU=nats.io, CN=localhost client"} ]
+			}
+		}
+
+	`
+	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
+	sconfA := createConfFile(t, []byte(srvConfA))
+	srvA, optsA := RunServerWithConfig(sconfA)
+	defer srvA.Shutdown()
+
+	// LeafNode remote that will connect to A and will not present certs.
+	srvConfB := `
+		host: "127.0.0.1"
+		port: -1
+
+		server_name: "BBB"
+
+		tls {
+			cert_file: "configs/certs/ocsp/server-status-request-url-03-cert.pem"
+			key_file: "configs/certs/ocsp/server-status-request-url-03-key.pem"
+			ca_file: "configs/certs/ocsp/ca-cert.pem"
+			timeout: 5
+		}
+		store_dir: '%s'
+
+		leafnodes {
+			remotes: [ {
+				url: "tls://127.0.0.1:%d"
+				tls {
+					cert_file: "configs/certs/ocsp/server-status-request-url-04-cert.pem"
+					key_file: "configs/certs/ocsp/server-status-request-url-04-key.pem"
+					ca_file: "configs/certs/ocsp/ca-cert.pem"
+					timeout: 5
+				}
+			} ]
+		}
+	`
+	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.LeafNode.Port)
+	conf := createConfFile(t, []byte(srvConfB))
+	srvB, _ := RunServerWithConfig(conf)
+	defer srvB.Shutdown()
+
+	// Client connects to server A.
+	cA, err := nats.Connect(fmt.Sprintf("tls://127.0.0.1:%d", optsA.Port),
+		nats.Secure(&tls.Config{
+			VerifyConnection: func(s tls.ConnectionState) error {
+				if s.OCSPResponse == nil {
+					return fmt.Errorf("missing OCSP Staple from server")
+				}
+				return nil
+			},
+		}),
+		nats.ClientCert("./configs/certs/ocsp/client-cert.pem", "./configs/certs/ocsp/client-key.pem"),
+		nats.RootCAs(caCert),
+		nats.ErrorHandler(noOpErrHandler),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cA.Close()
+	checkLeafNodeConnections(t, srvA, 1)
+}
+
 func TestOCSPGateway(t *testing.T) {
 	const (
 		caCert = "configs/certs/ocsp/ca-cert.pem"
@@ -1535,12 +2033,9 @@ func TestOCSPGateway(t *testing.T) {
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-status-request-url-08-cert.pem", ocsp.Good)
 
 	// Store Dirs
-	storeDirA := createDir(t, "_ocspA")
-	defer removeDir(t, storeDirA)
-	storeDirB := createDir(t, "_ocspB")
-	defer removeDir(t, storeDirB)
-	storeDirC := createDir(t, "_ocspC")
-	defer removeDir(t, storeDirC)
+	storeDirA := t.TempDir()
+	storeDirB := t.TempDir()
+	storeDirC := t.TempDir()
 
 	// Gateway server configuration
 	srvConfA := `
@@ -1555,7 +2050,7 @@ func TestOCSPGateway(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: A
 			host: "127.0.0.1"
@@ -1572,7 +2067,6 @@ func TestOCSPGateway(t *testing.T) {
 	`
 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
 	sconfA := createConfFile(t, []byte(srvConfA))
-	defer removeFile(t, sconfA)
 	srvA, optsA := RunServerWithConfig(sconfA)
 	defer srvA.Shutdown()
 
@@ -1589,7 +2083,7 @@ func TestOCSPGateway(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: B
 			host: "127.0.0.1"
@@ -1615,7 +2109,6 @@ func TestOCSPGateway(t *testing.T) {
 	`
 	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.Gateway.Port)
 	conf := createConfFile(t, []byte(srvConfB))
-	defer removeFile(t, conf)
 	srvB, optsB := RunServerWithConfig(conf)
 	defer srvB.Shutdown()
 
@@ -1662,7 +2155,7 @@ func TestOCSPGateway(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: C
 			host: "127.0.0.1"
@@ -1679,7 +2172,6 @@ func TestOCSPGateway(t *testing.T) {
 	`
 	srvConfC = fmt.Sprintf(srvConfC, storeDirC, optsA.Gateway.Port)
 	conf = createConfFile(t, []byte(srvConfC))
-	defer removeFile(t, conf)
 	srvC, optsC := RunServerWithConfig(conf)
 	defer srvC.Shutdown()
 
@@ -1758,7 +2250,7 @@ func TestOCSPGateway(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: A
 			host: "127.0.0.1"
@@ -1775,7 +2267,7 @@ func TestOCSPGateway(t *testing.T) {
 	`
 
 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
-	if err := ioutil.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
+	if err := os.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := srvA.Reload(); err != nil {
@@ -1841,7 +2333,6 @@ func TestOCSPGatewayIntermediate(t *testing.T) {
 	`
 	srvConfA = fmt.Sprintf(srvConfA, addr)
 	sconfA := createConfFile(t, []byte(srvConfA))
-	defer removeFile(t, sconfA)
 	srvA, optsA := RunServerWithConfig(sconfA)
 	defer srvA.Shutdown()
 
@@ -1875,7 +2366,6 @@ func TestOCSPGatewayIntermediate(t *testing.T) {
 	`
 	srvConfB = fmt.Sprintf(srvConfB, addr, optsA.Gateway.Port)
 	conf := createConfFile(t, []byte(srvConfB))
-	defer removeFile(t, conf)
 	srvB, optsB := RunServerWithConfig(conf)
 	defer srvB.Shutdown()
 
@@ -2133,7 +2623,6 @@ func TestOCSPCustomConfig(t *testing.T) {
 			test.configure()
 			content := test.config
 			conf := createConfFile(t, []byte(content))
-			defer removeFile(t, conf)
 			s, opts := RunServerWithConfig(conf)
 			defer s.Shutdown()
 
@@ -2195,7 +2684,6 @@ func TestOCSPCustomConfigReloadDisable(t *testing.T) {
 		}
 	`
 	conf := createConfFile(t, []byte(content))
-	defer removeFile(t, conf)
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
@@ -2214,6 +2702,7 @@ func TestOCSPCustomConfigReloadDisable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -2240,7 +2729,7 @@ func TestOCSPCustomConfigReloadDisable(t *testing.T) {
 			timeout: 5
 		}
 	`
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -2297,7 +2786,6 @@ func TestOCSPCustomConfigReloadEnable(t *testing.T) {
 		}
 	`
 	conf := createConfFile(t, []byte(content))
-	defer removeFile(t, conf)
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
@@ -2316,6 +2804,7 @@ func TestOCSPCustomConfigReloadEnable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -2342,7 +2831,7 @@ func TestOCSPCustomConfigReloadEnable(t *testing.T) {
 			timeout: 5
 		}
 	`
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -2400,7 +2889,7 @@ func newOCSPResponderDesignated(t *testing.T, issuerCertPEM, respCertPEM, respKe
 
 			fmt.Fprintf(rw, "%s %d", key, n)
 		case "POST":
-			data, err := ioutil.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(rw, err.Error(), http.StatusBadRequest)
 				return
@@ -2496,7 +2985,7 @@ func setOCSPStatus(t *testing.T, ocspURL, certPEM string, status int) {
 	}
 	defer resp.Body.Close()
 
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("failed to read OCSP HTTP response body: %s", err)
 	}
@@ -2531,7 +3020,7 @@ func parseKeyPEM(t *testing.T, keyPEM string) *rsa.PrivateKey {
 
 func parsePEM(t *testing.T, pemPath string) *pem.Block {
 	t.Helper()
-	data, err := ioutil.ReadFile(pemPath)
+	data, err := os.ReadFile(pemPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2599,14 +3088,10 @@ func TestOCSPSuperCluster(t *testing.T) {
 	setOCSPStatus(t, addr, "configs/certs/ocsp/server-cert.pem", ocsp.Good)
 
 	// Store Dirs
-	storeDirA := createDir(t, "_ocspA")
-	defer removeDir(t, storeDirA)
-	storeDirB := createDir(t, "_ocspB")
-	defer removeDir(t, storeDirB)
-	storeDirC := createDir(t, "_ocspC")
-	defer removeDir(t, storeDirC)
-	storeDirD := createDir(t, "_ocspD")
-	defer removeDir(t, storeDirD)
+	storeDirA := t.TempDir()
+	storeDirB := t.TempDir()
+	storeDirC := t.TempDir()
+	storeDirD := t.TempDir()
 
 	// Gateway server configuration
 	srvConfA := `
@@ -2623,7 +3108,7 @@ func TestOCSPSuperCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 
 		cluster {
 			name: A
@@ -2656,7 +3141,6 @@ func TestOCSPSuperCluster(t *testing.T) {
 	`
 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
 	sconfA := createConfFile(t, []byte(srvConfA))
-	defer removeFile(t, sconfA)
 	srvA, optsA := RunServerWithConfig(sconfA)
 	defer srvA.Shutdown()
 
@@ -2675,7 +3159,7 @@ func TestOCSPSuperCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 
 		cluster {
 			name: A
@@ -2710,7 +3194,6 @@ func TestOCSPSuperCluster(t *testing.T) {
 	`
 	srvConfB = fmt.Sprintf(srvConfB, storeDirB, optsA.Cluster.Port)
 	conf := createConfFile(t, []byte(srvConfB))
-	defer removeFile(t, conf)
 	srvB, optsB := RunServerWithConfig(conf)
 	defer srvB.Shutdown()
 
@@ -2748,7 +3231,7 @@ func TestOCSPSuperCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: C
 			host: "127.0.0.1"
@@ -2775,7 +3258,6 @@ func TestOCSPSuperCluster(t *testing.T) {
 	`
 	srvConfC = fmt.Sprintf(srvConfC, storeDirC, optsA.Gateway.Port)
 	conf = createConfFile(t, []byte(srvConfC))
-	defer removeFile(t, conf)
 	srvC, optsC := RunServerWithConfig(conf)
 	defer srvC.Shutdown()
 
@@ -2798,7 +3280,7 @@ func TestOCSPSuperCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: D
 			host: "127.0.0.1"
@@ -2838,7 +3320,6 @@ func TestOCSPSuperCluster(t *testing.T) {
 	`
 	srvConfD = fmt.Sprintf(srvConfD, addr, storeDirD, optsA.Gateway.Port, optsC.Gateway.Port)
 	conf = createConfFile(t, []byte(srvConfD))
-	defer removeFile(t, conf)
 	srvD, _ := RunServerWithConfig(conf)
 	defer srvD.Shutdown()
 

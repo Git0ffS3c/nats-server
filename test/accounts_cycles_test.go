@@ -15,6 +15,7 @@ package test
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +37,6 @@ func TestAccountCycleService(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cycle service import, got none")
@@ -54,7 +54,6 @@ func TestAccountCycleService(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cycle service import, got none")
@@ -76,7 +75,6 @@ func TestAccountCycleService(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cycle service import, got none")
@@ -96,7 +94,6 @@ func TestAccountCycleStream(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cyclic import, got none")
 	}
@@ -115,7 +112,6 @@ func TestAccountCycleStreamWithMapping(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cyclic import, got none")
 	}
@@ -138,7 +134,6 @@ func TestAccountCycleNonCycleStreamWithMapping(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 	if _, err := server.ProcessConfigFile(conf); err != nil {
 		t.Fatalf("Expected no error but got %s", err)
 	}
@@ -157,7 +152,6 @@ func TestAccountCycleServiceCycleWithMapping(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cycle service import, got none")
 	}
@@ -180,7 +174,6 @@ func TestAccountCycleServiceNonCycle(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	if _, err := server.ProcessConfigFile(conf); err != nil {
 		t.Fatalf("Expected no error but got %s", err)
@@ -207,7 +200,6 @@ func TestAccountCycleServiceNonCycleChain(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	if _, err := server.ProcessConfigFile(conf); err != nil {
 		t.Fatalf("Expected no error but got %s", err)
@@ -230,7 +222,6 @@ func TestServiceImportReplyMatchCycle(t *testing.T) {
 		}
 		no_auth_user: d
 	`))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -274,7 +265,6 @@ func TestServiceImportReplyMatchCycleMultiHops(t *testing.T) {
 		}
 		no_auth_user: d
 	`))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -348,6 +338,162 @@ func TestAccountCycleDepthLimit(t *testing.T) {
 			}
 		}
 		last = acc
+	}
+}
+
+// Test token and partition subject mapping within an account
+func TestAccountSubjectMapping(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		port: -1
+		mappings = {
+    		"foo.*.*" : "foo.$1.{{wildcard(2)}}.{{partition(10,1,2)}}"
+		}
+	`))
+
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	nc1 := clientConnectToServer(t, s)
+	defer nc1.Close()
+
+	numMessages := 100
+	subjectsReceived := make(chan string)
+
+	msg := []byte("HELLO")
+	sub1, err := nc1.Subscribe("foo.*.*.*", func(m *nats.Msg) {
+		subjectsReceived <- m.Subject
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	sub1.AutoUnsubscribe(numMessages * 2)
+
+	nc2 := clientConnectToServer(t, s)
+	defer nc2.Close()
+
+	// publish numMessages with an increasing id (should map to partition numbers with the range of 10 partitions) - twice
+	for j := 0; j < 2; j++ {
+		for i := 0; i < numMessages; i++ {
+			err = nc2.Publish(fmt.Sprintf("foo.%d.%d", i, numMessages-i), msg)
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+		}
+	}
+
+	// verify all the partition numbers are in the expected range
+	partitionsReceived := make([]int, numMessages)
+
+	for i := 0; i < numMessages; i++ {
+		subject := <-subjectsReceived
+		sTokens := strings.Split(subject, ".")
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		t1, _ := strconv.Atoi(sTokens[1])
+		t2, _ := strconv.Atoi(sTokens[2])
+		partitionsReceived[i], err = strconv.Atoi(sTokens[3])
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		if partitionsReceived[i] > 9 || partitionsReceived[i] < 0 || t1 != i || t2 != numMessages-i {
+			t.Fatalf("Error received unexpected %d.%d to partition %d", t1, t2, partitionsReceived[i])
+		}
+	}
+
+	// verify hashing is deterministic by checking it produces the same exact result twice
+	for i := 0; i < numMessages; i++ {
+		subject := <-subjectsReceived
+		partitionNumber, err := strconv.Atoi(strings.Split(subject, ".")[3])
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if partitionsReceived[i] != partitionNumber {
+			t.Fatalf("Error: same id mapped to two different partitions")
+		}
+	}
+}
+
+// test token and partition subject mapping within an account
+// Alice imports from Bob with subject mapping
+func TestAccountImportSubjectMapping(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		port: -1
+		accounts {
+		  A {
+			users: [{user: a,  pass: x}]
+			imports [ {stream: {account: B, subject: "foo.*.*"}, to : "foo.$1.{{wildcard(2)}}.{{partition(10,1,2)}}"}]
+		  }
+		  B {
+			users: [{user: b, pass x}]
+		    exports [ { stream: ">" } ]
+		  }
+		}
+	`))
+
+	s, opts := RunServerWithConfig(conf)
+
+	defer s.Shutdown()
+	ncA := clientConnectToServerWithUP(t, opts, "a", "x")
+	defer ncA.Close()
+
+	numMessages := 100
+	subjectsReceived := make(chan string)
+
+	msg := []byte("HELLO")
+	sub1, err := ncA.Subscribe("foo.*.*.*", func(m *nats.Msg) {
+		subjectsReceived <- m.Subject
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	sub1.AutoUnsubscribe(numMessages * 2)
+
+	ncB := clientConnectToServerWithUP(t, opts, "b", "x")
+	defer ncB.Close()
+
+	// publish numMessages with an increasing id (should map to partition numbers with the range of 10 partitions) - twice
+	for j := 0; j < 2; j++ {
+		for i := 0; i < numMessages; i++ {
+			err = ncB.Publish(fmt.Sprintf("foo.%d.%d", i, numMessages-i), msg)
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+		}
+	}
+
+	// verify all the partition numbers are in the expected range
+	partitionsReceived := make([]int, numMessages)
+
+	for i := 0; i < numMessages; i++ {
+		subject := <-subjectsReceived
+		sTokens := strings.Split(subject, ".")
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		t1, _ := strconv.Atoi(sTokens[1])
+		t2, _ := strconv.Atoi(sTokens[2])
+		partitionsReceived[i], err = strconv.Atoi(sTokens[3])
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		if partitionsReceived[i] > 9 || partitionsReceived[i] < 0 || t1 != i || t2 != numMessages-i {
+			t.Fatalf("Error received unexpected %d.%d to partition %d", t1, t2, partitionsReceived[i])
+		}
+	}
+
+	// verify hashing is deterministic by checking it produces the same exact result twice
+	for i := 0; i < numMessages; i++ {
+		subject := <-subjectsReceived
+		partitionNumber, err := strconv.Atoi(strings.Split(subject, ".")[3])
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if partitionsReceived[i] != partitionNumber {
+			t.Fatalf("Error: same id mapped to two different partitions")
+		}
 	}
 }
 

@@ -16,7 +16,7 @@ package test
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -357,7 +357,6 @@ func TestReloadDoesNotWipeAccountsWithOperatorMode(t *testing.T) {
 	`
 	contents := strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
 	conf := createConfFile(t, []byte(contents))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -367,7 +366,6 @@ func TestReloadDoesNotWipeAccountsWithOperatorMode(t *testing.T) {
 	contents2 := strings.Replace(fmt.Sprintf(cf, routeStr, sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
 
 	conf2 := createConfFile(t, []byte(contents2))
-	defer removeFile(t, conf2)
 
 	s2, opts2 := RunServerWithConfig(conf2)
 	defer s2.Shutdown()
@@ -416,12 +414,12 @@ func TestReloadDoesNotWipeAccountsWithOperatorMode(t *testing.T) {
 	s2.Shutdown()
 
 	// Now change config and do reload which will do an auth change.
-	b, err := ioutil.ReadFile(conf)
+	b, err := os.ReadFile(conf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	newConf := bytes.Replace(b, []byte("2.2"), []byte("3.3"), 1)
-	err = ioutil.WriteFile(conf, newConf, 0644)
+	err = os.WriteFile(conf, newConf, 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +479,6 @@ func TestReloadDoesUpdateAccountsWithMemoryResolver(t *testing.T) {
 	`
 	contents := strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
 	conf := createConfFile(t, []byte(contents))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -505,7 +502,7 @@ func TestReloadDoesUpdateAccountsWithMemoryResolver(t *testing.T) {
 	accJWT2, accKP2 := createAccountForConfig(t)
 	accPub2, _ := accKP2.PublicKey()
 	contents = strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, accPub2, accJWT2), "\n\t", "\n", -1)
-	err = ioutil.WriteFile(conf, []byte(contents), 0644)
+	err = os.WriteFile(conf, []byte(contents), 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,14 +570,13 @@ func TestReloadFailsWithBadAccountsWithMemoryResolver(t *testing.T) {
 	`
 	contents := strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, apub, ajwt), "\n\t", "\n", -1)
 	conf := createConfFile(t, []byte(contents))
-	defer removeFile(t, conf)
 
 	s, _ := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
 	// Now add in bogus account for second item and make sure reload fails.
 	contents = strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, "foo", "bar"), "\n\t", "\n", -1)
-	err = ioutil.WriteFile(conf, []byte(contents), 0644)
+	err = os.WriteFile(conf, []byte(contents), 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +590,7 @@ func TestReloadFailsWithBadAccountsWithMemoryResolver(t *testing.T) {
 	accPub, _ := accKP.PublicKey()
 
 	contents = strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
-	err = ioutil.WriteFile(conf, []byte(contents), 0644)
+	err = os.WriteFile(conf, []byte(contents), 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +633,6 @@ func TestConnsRequestDoesNotLoadAccountCheckingConnLimits(t *testing.T) {
 	`
 	contents := strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
 	conf := createConfFile(t, []byte(contents))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -647,7 +642,6 @@ func TestConnsRequestDoesNotLoadAccountCheckingConnLimits(t *testing.T) {
 	contents2 := strings.Replace(fmt.Sprintf(cf, routeStr, sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
 
 	conf2 := createConfFile(t, []byte(contents2))
-	defer removeFile(t, conf2)
 
 	s2, _ := RunServerWithConfig(conf2)
 	defer s2.Shutdown()

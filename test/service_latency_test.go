@@ -16,10 +16,10 @@ package test
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
-	"path"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -361,7 +361,6 @@ func TestServiceLatencyClientRTTSlowerVsServiceRTT(t *testing.T) {
 		}
 
 		// Send the request.
-		start = time.Now()
 		_, err := nc2.Request("ngs.usage", []byte("1h"), time.Second)
 		if err != nil {
 			t.Fatalf("Expected a response")
@@ -585,6 +584,7 @@ func TestServiceLatencyNoSubsLeak(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		nc := clientConnect(t, sc.clusters[1].opts[1], "bar")
+		defer nc.Close()
 		if _, err := nc.Request("ngs.usage", []byte("1h"), time.Second); err != nil {
 			t.Fatalf("Error on request: %v", err)
 		}
@@ -745,7 +745,6 @@ func TestServiceLatencyWithJWT(t *testing.T) {
 	`
 	contents := strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, svcPub, svcJWT, accPub, accJWT), "\n\t", "\n", -1)
 	conf := createConfFile(t, []byte(contents))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -755,7 +754,6 @@ func TestServiceLatencyWithJWT(t *testing.T) {
 	contents2 := strings.Replace(fmt.Sprintf(cf, routeStr, sysPub, sysPub, sysJWT, svcPub, svcJWT, accPub, accJWT), "\n\t", "\n", -1)
 
 	conf2 := createConfFile(t, []byte(contents2))
-	defer removeFile(t, conf2)
 
 	s2, opts2 := RunServerWithConfig(conf2)
 	defer s2.Shutdown()
@@ -1179,7 +1177,6 @@ func TestServiceLatencyOldRequestStyleSingleServer(t *testing.T) {
 
 		system_account: SYS
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -1245,7 +1242,6 @@ func TestServiceAndStreamStackOverflow(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -1424,7 +1420,6 @@ func TestServiceLatencyRequestorSharesConfig(t *testing.T) {
 
 		system_account: SYS
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -1493,14 +1488,13 @@ func TestServiceLatencyRequestorSharesConfig(t *testing.T) {
 
 		system_account: SYS
 	`)
-	if err := ioutil.WriteFile(conf, newConf, 0600); err != nil {
+	if err := os.WriteFile(conf, newConf, 0600); err != nil {
 		t.Fatalf("Error rewriting server's config file: %v", err)
 	}
 	if err := srv.Reload(); err != nil {
 		t.Fatalf("Error on server reload: %v", err)
 	}
 
-	start = time.Now()
 	if _, err = nc2.Request("SVC", []byte("1h"), time.Second); err != nil {
 		t.Fatalf("Expected a response")
 	}
@@ -1536,7 +1530,6 @@ func TestServiceLatencyLossTest(t *testing.T) {
 		}
 		system_account: SYS
 	`))
-	defer removeFile(t, conf)
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
 
@@ -1723,7 +1716,6 @@ func TestServiceLatencyHeaderTriggered(t *testing.T) {
 
 				system_account: SYS
 			`, v.shared)))
-			defer removeFile(t, conf)
 			srv, opts := RunServerWithConfig(conf)
 			defer srv.Shutdown()
 
@@ -1809,15 +1801,16 @@ func TestServiceLatencyMissingResults(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, accConf)
 
 	s1Conf := createConfFile(t, []byte(fmt.Sprintf(`
 		listen: 127.0.0.1:-1
 		server_name: s1
 		cluster { port: -1 }
 		include %q
-	`, path.Base(accConf))))
-	defer removeFile(t, s1Conf)
+	`, filepath.Base(accConf))))
+
+	// Link accConf for relative import from s1Conf
+	os.Link(accConf, filepath.Join(filepath.Dir(s1Conf), filepath.Base(accConf)))
 
 	s1, opts1 := RunServerWithConfig(s1Conf)
 	defer s1.Shutdown()
@@ -1830,8 +1823,10 @@ func TestServiceLatencyMissingResults(t *testing.T) {
 			routes = [ nats-route://127.0.0.1:%d ]
 		}
 		include %q
-	`, opts1.Cluster.Port, path.Base(accConf))))
-	defer removeFile(t, s2Conf)
+	`, opts1.Cluster.Port, filepath.Base(accConf))))
+
+	// Link accConf for relative import from s2Conf
+	os.Link(accConf, filepath.Join(filepath.Dir(s2Conf), filepath.Base(accConf)))
 
 	s2, opts2 := RunServerWithConfig(s2Conf)
 	defer s2.Shutdown()

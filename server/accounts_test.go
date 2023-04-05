@@ -16,8 +16,10 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +46,60 @@ func simpleAccountServer(t *testing.T) (*Server, *Account, *Account) {
 		t.Fatalf("Error creating account 'bar': %v", err)
 	}
 	return s, f, b
+}
+
+func TestPlaceHolderIndex(t *testing.T) {
+	testString := "$1"
+	transformType, indexes, nbPartitions, _, err := indexPlaceHolders(testString)
+	var position int32
+
+	if err != nil || transformType != Wildcard || len(indexes) != 1 || indexes[0] != 1 || nbPartitions != -1 {
+		t.Fatalf("Error parsing %s", testString)
+	}
+
+	testString = "{{partition(10,1,2,3)}}"
+
+	transformType, indexes, nbPartitions, _, err = indexPlaceHolders(testString)
+
+	if err != nil || transformType != Partition || !reflect.DeepEqual(indexes, []int{1, 2, 3}) || nbPartitions != 10 {
+		t.Fatalf("Error parsing %s", testString)
+	}
+
+	testString = "{{ Partition (10,1,2,3) }}"
+
+	transformType, indexes, nbPartitions, _, err = indexPlaceHolders(testString)
+
+	if err != nil || transformType != Partition || !reflect.DeepEqual(indexes, []int{1, 2, 3}) || nbPartitions != 10 {
+		t.Fatalf("Error parsing %s", testString)
+	}
+
+	testString = "{{wildcard(2)}}"
+	transformType, indexes, nbPartitions, _, err = indexPlaceHolders(testString)
+
+	if err != nil || transformType != Wildcard || len(indexes) != 1 || indexes[0] != 2 || nbPartitions != -1 {
+		t.Fatalf("Error parsing %s", testString)
+	}
+
+	testString = "{{SplitFromLeft(2,1)}}"
+	transformType, indexes, position, _, err = indexPlaceHolders(testString)
+
+	if err != nil || transformType != SplitFromLeft || len(indexes) != 1 || indexes[0] != 2 || position != 1 {
+		t.Fatalf("Error parsing %s", testString)
+	}
+
+	testString = "{{SplitFromRight(3,2)}}"
+	transformType, indexes, position, _, err = indexPlaceHolders(testString)
+
+	if err != nil || transformType != SplitFromRight || len(indexes) != 1 || indexes[0] != 3 || position != 2 {
+		t.Fatalf("Error parsing %s", testString)
+	}
+
+	testString = "{{SliceFromLeft(2,2)}}"
+	transformType, indexes, sliceSize, _, err := indexPlaceHolders(testString)
+
+	if err != nil || transformType != SliceFromLeft || len(indexes) != 1 || indexes[0] != 2 || sliceSize != 2 {
+		t.Fatalf("Error parsing %s", testString)
+	}
 }
 
 func TestRegisterDuplicateAccounts(t *testing.T) {
@@ -252,9 +308,9 @@ func TestAccountIsolationExportImport(t *testing.T) {
 			// Connect with different accounts.
 			ncExp := natsConnect(t, s.ClientURL(), createUserCreds(t, nil, accExpPair),
 				nats.Name(fmt.Sprintf("nc-exporter-%s", c.exp)))
+			defer ncExp.Close()
 			ncImp := natsConnect(t, s.ClientURL(), createUserCreds(t, nil, accImpPair),
 				nats.Name(fmt.Sprintf("nc-importer-%s", c.imp)))
-			defer ncExp.Close()
 			defer ncImp.Close()
 
 			checkIsolation(t, c.pubSubj, ncExp, ncImp)
@@ -281,16 +337,15 @@ func TestAccountIsolationExportImport(t *testing.T) {
 			`,
 				c.exp, c.imp,
 			)))
-			defer removeFile(t, cf)
 			s, _ := RunServerWithConfig(cf)
 			defer s.Shutdown()
 
 			// Connect with different accounts.
 			ncExp := natsConnect(t, s.ClientURL(), nats.UserInfo("accExp", "accExp"),
 				nats.Name(fmt.Sprintf("nc-exporter-%s", c.exp)))
+			defer ncExp.Close()
 			ncImp := natsConnect(t, s.ClientURL(), nats.UserInfo("accImp", "accImp"),
 				nats.Name(fmt.Sprintf("nc-importer-%s", c.imp)))
-			defer ncExp.Close()
 			defer ncImp.Close()
 
 			checkIsolation(t, c.pubSubj, ncExp, ncImp)
@@ -299,6 +354,88 @@ func TestAccountIsolationExportImport(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMultiAccountsIsolation(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+	listen: 127.0.0.1:-1
+	accounts: {
+		PUBLIC: {
+			users:[{user: public, password: public}]
+			exports: [
+			  { stream: orders.client.stream.> }
+			  { stream: orders.client2.stream.> }
+			]
+		}
+		CLIENT: {
+			users:[{user: client, password: client}]
+			imports: [
+			  { stream: { account: PUBLIC, subject: orders.client.stream.> }}
+			]
+		}
+		CLIENT2: {
+			users:[{user: client2, password: client2}]
+			imports: [
+			  { stream: { account: PUBLIC, subject: orders.client2.stream.> }}
+			]
+		}
+	}`))
+
+	s, _ := RunServerWithConfig(conf)
+	if config := s.JetStreamConfig(); config != nil {
+		defer removeDir(t, config.StoreDir)
+	}
+	defer s.Shutdown()
+
+	// Create a connection for CLIENT and subscribe on orders.>
+	clientnc := natsConnect(t, s.ClientURL(), nats.UserInfo("client", "client"))
+	defer clientnc.Close()
+
+	clientsub := natsSubSync(t, clientnc, "orders.>")
+	natsFlush(t, clientnc)
+
+	// Now same for CLIENT2.
+	client2nc := natsConnect(t, s.ClientURL(), nats.UserInfo("client2", "client2"))
+	defer client2nc.Close()
+
+	client2sub := natsSubSync(t, client2nc, "orders.>")
+	natsFlush(t, client2nc)
+
+	// Now create a connection for PUBLIC
+	publicnc := natsConnect(t, s.ClientURL(), nats.UserInfo("public", "public"))
+	defer publicnc.Close()
+	// Publish on 'orders.client.stream.entry', so only CLIENT should receive it.
+	natsPub(t, publicnc, "orders.client.stream.entry", []byte("test1"))
+
+	// Verify that clientsub gets it.
+	msg := natsNexMsg(t, clientsub, time.Second)
+	require_Equal(t, string(msg.Data), "test1")
+
+	// And also verify that client2sub does NOT get it.
+	_, err := client2sub.NextMsg(100 * time.Microsecond)
+	require_Error(t, err, nats.ErrTimeout)
+
+	clientsub.Unsubscribe()
+	natsFlush(t, clientnc)
+	client2sub.Unsubscribe()
+	natsFlush(t, client2nc)
+
+	// Now have both accounts subscribe to "orders.*.stream.entry"
+	clientsub = natsSubSync(t, clientnc, "orders.*.stream.entry")
+	natsFlush(t, clientnc)
+
+	client2sub = natsSubSync(t, client2nc, "orders.*.stream.entry")
+	natsFlush(t, client2nc)
+
+	// Using the PUBLIC account, publish on the "CLIENT" subject
+	natsPub(t, publicnc, "orders.client.stream.entry", []byte("test2"))
+	natsFlush(t, publicnc)
+
+	msg = natsNexMsg(t, clientsub, time.Second)
+	require_Equal(t, string(msg.Data), "test2")
+
+	_, err = client2sub.NextMsg(100 * time.Microsecond)
+	require_Error(t, err, nats.ErrTimeout)
 }
 
 func TestAccountFromOptions(t *testing.T) {
@@ -333,7 +470,6 @@ func TestNewAccountAndRequireNewAlwaysError(t *testing.T) {
 			B: { users: [ {user: ub, password: pb} ] },
 		}
 	`))
-	defer removeFile(t, conf)
 
 	s, _ := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -397,8 +533,11 @@ func accountNameExists(name string, accounts []*Account) bool {
 }
 
 func TestAccountSimpleConfig(t *testing.T) {
-	confFileName := createConfFile(t, []byte(`accounts = [foo, bar]`))
-	defer removeFile(t, confFileName)
+	cfg1 := `
+		accounts = [foo, bar]
+	`
+
+	confFileName := createConfFile(t, []byte(cfg1))
 	opts, err := ProcessConfigFile(confFileName)
 	if err != nil {
 		t.Fatalf("Received an error processing config file: %v", err)
@@ -413,9 +552,12 @@ func TestAccountSimpleConfig(t *testing.T) {
 		t.Fatal("Expected a 'bar' account")
 	}
 
+	cfg2 := `
+		accounts = [foo, foo]
+	`
+
 	// Make sure double entries is an error.
-	confFileName = createConfFile(t, []byte(`accounts = [foo, foo]`))
-	defer removeFile(t, confFileName)
+	confFileName = createConfFile(t, []byte(cfg2))
 	_, err = ProcessConfigFile(confFileName)
 	if err == nil {
 		t.Fatalf("Expected an error with double account entries")
@@ -439,7 +581,6 @@ func TestAccountParseConfig(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, confFileName)
 	opts, err := ProcessConfigFile(confFileName)
 	if err != nil {
 		t.Fatalf("Received an error processing config file: %v", err)
@@ -489,7 +630,6 @@ func TestAccountParseConfigDuplicateUsers(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, confFileName)
 	_, err := ProcessConfigFile(confFileName)
 	if err == nil {
 		t.Fatalf("Expected an error with double user entries")
@@ -597,7 +737,6 @@ func TestImportExportConfigFailures(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, cf)
 	if _, err := ProcessConfigFile(cf); err == nil {
 		t.Fatalf("Expected an error with import from unknown account")
 	}
@@ -609,7 +748,6 @@ func TestImportExportConfigFailures(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, cf)
 	if _, err := ProcessConfigFile(cf); err == nil {
 		t.Fatalf("Expected an error with import of a service with no account")
 	}
@@ -621,7 +759,6 @@ func TestImportExportConfigFailures(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, cf)
 	if _, err := ProcessConfigFile(cf); err == nil {
 		t.Fatalf("Expected an error with import of a service with wildcard subject")
 	}
@@ -633,7 +770,6 @@ func TestImportExportConfigFailures(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, cf)
 	if _, err := ProcessConfigFile(cf); err == nil {
 		t.Fatalf("Expected an error with export with unknown keyword")
 	}
@@ -645,7 +781,6 @@ func TestImportExportConfigFailures(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, cf)
 	if _, err := ProcessConfigFile(cf); err == nil {
 		t.Fatalf("Expected an error with import with unknown keyword")
 	}
@@ -657,7 +792,6 @@ func TestImportExportConfigFailures(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, cf)
 	if _, err := ProcessConfigFile(cf); err == nil {
 		t.Fatalf("Expected an error with export with account")
 	}
@@ -885,7 +1019,6 @@ func TestStreamImportLengthBug(t *testing.T) {
 	  }
 	}
 	`))
-	defer removeFile(t, cf)
 	if _, err := ProcessConfigFile(cf); err == nil {
 		t.Fatalf("Expected an error with import with wildcard prefix")
 	}
@@ -1966,12 +2099,17 @@ func TestCrossAccountServiceResponseTypes(t *testing.T) {
 
 	cfoo.parseAsync(string(mReply))
 
-	var b [256]byte
-	n, err := crBar.Read(b[:])
-	if err != nil {
-		t.Fatalf("Error reading response: %v", err)
+	var buf []byte
+	for i := 0; i < 20; i++ {
+		b, err := crBar.ReadBytes('\n')
+		if err != nil {
+			t.Fatalf("Error reading response: %v", err)
+		}
+		buf = append(buf[:], b...)
+		if mraw = msgPat.FindAllStringSubmatch(string(buf), -1); len(mraw) == 10 {
+			break
+		}
 	}
-	mraw = msgPat.FindAllStringSubmatch(string(b[:n]), -1)
 	if len(mraw) != 10 {
 		t.Fatalf("Expected a response but got %d", len(mraw))
 	}
@@ -2057,7 +2195,6 @@ func TestAccountMapsUsers(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, confFileName)
 	opts, err := ProcessConfigFile(confFileName)
 	if err != nil {
 		t.Fatalf("Unexpected error parsing config file: %v", err)
@@ -2167,7 +2304,6 @@ func TestAccountGlobalDefault(t *testing.T) {
 
 	// Make sure we can not define one in a config file either.
 	confFileName := createConfFile(t, []byte(`accounts { $G {} }`))
-	defer removeFile(t, confFileName)
 
 	if _, err := ProcessConfigFile(confFileName); err == nil {
 		t.Fatalf("Expected an error parsing config file with reserved account")
@@ -2695,13 +2831,13 @@ func TestAccountMultiWeightedRouteMappings(t *testing.T) {
 
 func TestGlobalAccountRouteMappingsConfiguration(t *testing.T) {
 	cf := createConfFile(t, []byte(`
+	port: -1
 	mappings = {
 		foo: bar
 		foo.*: [ { dest: bar.v1.$1, weight: 40% }, { destination: baz.v2.$1, weight: 20 } ]
 		bar.*.*: RAB.$2.$1
     }
     `))
-	defer removeFile(t, cf)
 
 	s, _ := RunServerWithConfig(cf)
 	defer s.Shutdown()
@@ -2745,6 +2881,7 @@ func TestGlobalAccountRouteMappingsConfiguration(t *testing.T) {
 
 func TestAccountRouteMappingsConfiguration(t *testing.T) {
 	cf := createConfFile(t, []byte(`
+	port: -1
 	accounts {
 		synadia {
 			users = [{user: derek, password: foo}]
@@ -2756,7 +2893,6 @@ func TestAccountRouteMappingsConfiguration(t *testing.T) {
 		}
 	}
     `))
-	defer removeFile(t, cf)
 
 	s, _ := RunServerWithConfig(cf)
 	defer s.Shutdown()
@@ -2781,12 +2917,12 @@ func TestAccountRouteMappingsConfiguration(t *testing.T) {
 
 func TestAccountRouteMappingsWithLossInjection(t *testing.T) {
 	cf := createConfFile(t, []byte(`
+	port: -1
 	mappings = {
 		foo: { dest: foo, weight: 80% }
 		bar: { dest: bar, weight: 0% }
     }
     `))
-	defer removeFile(t, cf)
 
 	s, _ := RunServerWithConfig(cf)
 	defer s.Shutdown()
@@ -2819,11 +2955,11 @@ func TestAccountRouteMappingsWithLossInjection(t *testing.T) {
 
 func TestAccountRouteMappingsWithOriginClusterFilter(t *testing.T) {
 	cf := createConfFile(t, []byte(`
+	port: -1
 	mappings = {
 		foo: { dest: bar, cluster: SYN, weight: 100% }
     }
     `))
-	defer removeFile(t, cf)
 
 	s, _ := RunServerWithConfig(cf)
 	defer s.Shutdown()
@@ -2857,6 +2993,7 @@ func TestAccountRouteMappingsWithOriginClusterFilter(t *testing.T) {
 
 func TestAccountServiceImportWithRouteMappings(t *testing.T) {
 	cf := createConfFile(t, []byte(`
+	port: -1
     accounts {
       foo {
         users = [{user: derek, password: foo}]
@@ -2868,7 +3005,6 @@ func TestAccountServiceImportWithRouteMappings(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, cf)
 
 	s, opts := RunServerWithConfig(cf)
 	defer s.Shutdown()
@@ -2900,6 +3036,7 @@ func TestAccountServiceImportWithRouteMappings(t *testing.T) {
 
 func TestAccountImportsWithWildcardSupport(t *testing.T) {
 	cf := createConfFile(t, []byte(`
+	port: -1
     accounts {
       foo {
         users = [{user: derek, password: foo}]
@@ -2919,7 +3056,6 @@ func TestAccountImportsWithWildcardSupport(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, cf)
 
 	s, opts := RunServerWithConfig(cf)
 	defer s.Shutdown()
@@ -2995,6 +3131,7 @@ func TestAccountImportsWithWildcardSupport(t *testing.T) {
 // duplicates TestJWTAccountImportsWithWildcardSupport (jwt_test.go) in config
 func TestAccountImportsWithWildcardSupportStreamAndService(t *testing.T) {
 	cf := createConfFile(t, []byte(`
+	port: -1
     accounts {
       foo {
         users = [{user: derek, password: foo}]
@@ -3012,7 +3149,6 @@ func TestAccountImportsWithWildcardSupportStreamAndService(t *testing.T) {
       }
     }
     `))
-	defer removeFile(t, cf)
 
 	s, opts := RunServerWithConfig(cf)
 	defer s.Shutdown()
@@ -3131,10 +3267,12 @@ func TestSamplingHeader(t *testing.T) {
 func TestSubjectTransforms(t *testing.T) {
 	shouldErr := func(src, dest string) {
 		t.Helper()
-		if _, err := newTransform(src, dest); err != ErrBadSubject {
+		if _, err := newTransform(src, dest); err != ErrBadSubject && !errors.Is(err, ErrInvalidMappingDestination) {
 			t.Fatalf("Did not get an error for src=%q and dest=%q", src, dest)
 		}
 	}
+
+	shouldErr("foo.*.*", "bar.$2") // Must place all pwcs.
 
 	// Must be valid subjects.
 	shouldErr("foo", "")
@@ -3144,10 +3282,19 @@ func TestSubjectTransforms(t *testing.T) {
 	// e.g. foo.* -> bar.$1.
 	// Need to have as many pwcs as placements on other side.
 	shouldErr("foo.*", "bar.*")
-	shouldErr("foo.*", "bar.$2")   // Bad pwc token identifier
-	shouldErr("foo.*", "bar.$1.>") // fwcs have to match.
-	shouldErr("foo.>", "bar.baz")  // fwcs have to match.
-	shouldErr("foo.*.*", "bar.$2") // Must place all pwcs.
+	shouldErr("foo.*", "bar.$2")                   // Bad pwc token identifier
+	shouldErr("foo.*", "bar.$1.>")                 // fwcs have to match.
+	shouldErr("foo.>", "bar.baz")                  // fwcs have to match.
+	shouldErr("foo.*.*", "bar.$2")                 // Must place all pwcs.
+	shouldErr("foo.*", "foo.$foo")                 // invalid $ value
+	shouldErr("foo.*", "foo.{{wildcard(2)}}")      // Mapping function being passed an out of range wildcard index
+	shouldErr("foo.*", "foo.{{unimplemented(1)}}") // Mapping trying to use an unknown mapping function
+	shouldErr("foo.*", "foo.{{partition(10)}}")    // Not enough arguments passed to the mapping function
+	shouldErr("foo.*", "foo.{{wildcard(foo)}}")    // Invalid argument passed to the mapping function
+	shouldErr("foo.*", "foo.{{wildcard()}}")       // Not enough arguments passed to the mapping function
+	shouldErr("foo.*", "foo.{{wildcard(1,2)}}")    // Too many arguments passed to the mapping function
+	shouldErr("foo.*", "foo.{{ wildcard5) }}")     // Bad mapping function
+	shouldErr("foo.*", "foo.{{splitLeft(2,2}}")    // arg out of range
 
 	shouldBeOK := func(src, dest string) *transform {
 		t.Helper()
@@ -3161,11 +3308,14 @@ func TestSubjectTransforms(t *testing.T) {
 	shouldBeOK("foo", "bar")
 	shouldBeOK("foo.*.bar.*.baz", "req.$2.$1")
 	shouldBeOK("baz.>", "mybaz.>")
+	shouldBeOK("*.*", "{{partition(10,1,2)}}")
+	shouldBeOK("foo.*.*", "foo.{{wildcard(1)}}.{{wildcard(2)}}.{{partition(5,1,2)}}")
+	shouldBeOK("*", "{{splitfromleft(1,1)}}")
 
 	shouldMatch := func(src, dest, sample, expected string) {
 		t.Helper()
 		tr := shouldBeOK(src, dest)
-		s, err := tr.match(sample)
+		s, err := tr.Match(sample)
 		if err != nil {
 			t.Fatalf("Got an error %v when expecting a match for %q to %q", err, sample, expected)
 		}
@@ -3179,6 +3329,13 @@ func TestSubjectTransforms(t *testing.T) {
 	shouldMatch("baz.>", "my.pre.>", "baz.1.2.3", "my.pre.1.2.3")
 	shouldMatch("baz.>", "foo.bar.>", "baz.1.2.3", "foo.bar.1.2.3")
 	shouldMatch("*", "foo.bar.$1", "foo", "foo.bar.foo")
+	shouldMatch("*", "{{splitfromleft(1,3)}}", "12345", "123.45")
+	shouldMatch("*", "{{SplitFromRight(1,3)}}", "12345", "12.345")
+	shouldMatch("*", "{{SliceFromLeft(1,3)}}", "1234567890", "123.456.789.0")
+	shouldMatch("*", "{{SliceFromRight(1,3)}}", "1234567890", "1.234.567.890")
+	shouldMatch("*", "{{split(1,-)}}", "-abc-def--ghi-", "abc.def.ghi")
+	shouldMatch("*", "{{split(1,-)}}", "abc-def--ghi-", "abc.def.ghi")
+	shouldMatch("*.*", "{{split(2,-)}}.{{splitfromleft(1,2)}}", "foo.-abc-def--ghij-", "abc.def.ghij.fo.o") // combo + checks split for multiple instance of deliminator and deliminator being at the start or end
 }
 
 func TestAccountSystemPermsWithGlobalAccess(t *testing.T) {
@@ -3188,7 +3345,6 @@ func TestAccountSystemPermsWithGlobalAccess(t *testing.T) {
 			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	s, _ := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -3231,7 +3387,6 @@ accounts: {
 
 func TestImportSubscriptionPartialOverlapWithPrefix(t *testing.T) {
 	cf := createConfFile(t, []byte(fmt.Sprintf(importSubscriptionOverlapTemplate, ">", ">", "prefix: myprefix")))
-	defer removeFile(t, cf)
 
 	s, opts := RunServerWithConfig(cf)
 	defer s.Shutdown()
@@ -3260,7 +3415,6 @@ func TestImportSubscriptionPartialOverlapWithPrefix(t *testing.T) {
 
 func TestImportSubscriptionPartialOverlapWithTransform(t *testing.T) {
 	cf := createConfFile(t, []byte(fmt.Sprintf(importSubscriptionOverlapTemplate, "*.*.>", "*.*.>", "to: myprefix.$2.$1.>")))
-	defer removeFile(t, cf)
 
 	s, opts := RunServerWithConfig(cf)
 	defer s.Shutdown()
@@ -3293,6 +3447,7 @@ func TestImportSubscriptionPartialOverlapWithTransform(t *testing.T) {
 
 func TestAccountLimitsServerConfig(t *testing.T) {
 	cf := createConfFile(t, []byte(`
+	port: -1
 	max_connections: 10
 	accounts {
 		MAXC {
@@ -3306,7 +3461,6 @@ func TestAccountLimitsServerConfig(t *testing.T) {
 		}
 	}
     `))
-	defer removeFile(t, cf)
 
 	s, _ := RunServerWithConfig(cf)
 	defer s.Shutdown()
@@ -3331,4 +3485,201 @@ func TestAccountLimitsServerConfig(t *testing.T) {
 	// Should fail.
 	_, err = nats.Connect(s.ClientURL(), nats.UserInfo("derek", "foo"))
 	require_Error(t, err)
+}
+
+func TestAccountUserSubPermsWithQueueGroups(t *testing.T) {
+	cf := createConfFile(t, []byte(`
+	listen: 127.0.0.1:-1
+
+	authorization {
+	users = [
+		{ user: user, password: "pass",
+			permissions: {
+				publish: "foo.restricted"
+				subscribe: { allow: "foo.>", deny: "foo.restricted" }
+				allow_responses: { max: 1, ttl: 0s }
+			}
+		}
+	]}
+    `))
+
+	s, _ := RunServerWithConfig(cf)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(s.ClientURL(), nats.UserInfo("user", "pass"))
+	require_NoError(t, err)
+	defer nc.Close()
+
+	// qsub solo.
+	qsub, err := nc.QueueSubscribeSync("foo.>", "qg")
+	require_NoError(t, err)
+
+	err = nc.Publish("foo.restricted", []byte("RESTRICTED"))
+	require_NoError(t, err)
+	nc.Flush()
+
+	// Expect no msgs.
+	checkSubsPending(t, qsub, 0)
+}
+
+func TestAccountImportCycle(t *testing.T) {
+	tmpl := `
+	port: -1
+	accounts: {
+		CP: {
+			users: [
+				{user: cp, password: cp},
+			],
+			exports: [
+				{service: "q1.>", response_type: Singleton},
+				{service: "q2.>", response_type: Singleton},
+				%s
+			],
+		},
+		A: {
+			users: [
+				{user: a, password: a},
+			],
+			imports: [
+				{service: {account: CP, subject: "q1.>"}},
+				{service: {account: CP, subject: "q2.>"}},
+				%s
+			]
+		},
+	}
+	`
+	cf := createConfFile(t, []byte(fmt.Sprintf(tmpl, _EMPTY_, _EMPTY_)))
+	s, _ := RunServerWithConfig(cf)
+	defer s.Shutdown()
+	ncCp, err := nats.Connect(s.ClientURL(), nats.UserInfo("cp", "cp"))
+	require_NoError(t, err)
+	defer ncCp.Close()
+	ncA, err := nats.Connect(s.ClientURL(), nats.UserInfo("a", "a"))
+	require_NoError(t, err)
+	defer ncA.Close()
+	// setup responder
+	natsSub(t, ncCp, "q1.>", func(m *nats.Msg) { m.Respond([]byte("reply")) })
+	// setup requestor
+	ib := "q2.inbox"
+	subAResp, err := ncA.SubscribeSync(ib)
+	require_NoError(t, err)
+	req := func() {
+		t.Helper()
+		// send request
+		err = ncA.PublishRequest("q1.a", ib, []byte("test"))
+		require_NoError(t, err)
+		mRep, err := subAResp.NextMsg(time.Second)
+		require_NoError(t, err)
+		require_Equal(t, string(mRep.Data), "reply")
+	}
+	req()
+
+	// Update the config and do a config reload and make sure it all still work
+	changeCurrentConfigContentWithNewContent(t, cf, []byte(
+		fmt.Sprintf(tmpl, `{service: "q3.>", response_type: Singleton},`, `{service: {account: CP, subject: "q3.>"}},`)))
+	err = s.Reload()
+	require_NoError(t, err)
+	req()
+}
+
+func TestAccountImportOwnExport(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		port: -1
+		accounts: {
+			A: {
+			exports: [
+				{ service: echo, accounts: [A], latency: { subject: "latency.echo" } }
+			],
+			imports: [
+				{ service: { account: A, subject: echo } }
+			]
+
+			users: [
+				{ user: user, pass: pass }
+			]
+			}
+		}
+	`))
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	nc := natsConnect(t, s.ClientURL(), nats.UserInfo("user", "pass"))
+	defer nc.Close()
+
+	natsSub(t, nc, "echo", func(m *nats.Msg) { m.Respond(nil) })
+	_, err := nc.Request("echo", []byte("request"), time.Second)
+	require_NoError(t, err)
+}
+
+// Test for a bug that would cause duplicate deliveries in certain situations when
+// service export/imports and leafnodes involved.
+// https://github.com/nats-io/nats-server/issues/3191
+func TestAccountImportDuplicateResponseDeliveryWithLeafnodes(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		port: -1
+		accounts: {
+			A: {
+				users = [{user: A, password: P}]
+				exports: [ { service: "foo", response_type: stream } ]
+			}
+			B: {
+				users = [{user: B, password: P}]
+				imports: [ { service: {account: "A", subject:"foo"} } ]
+			}
+		}
+		leaf { listen: "127.0.0.1:17222" }
+	`))
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	// Requestors will connect to account B.
+	nc, err := nats.Connect(s.ClientURL(), nats.UserInfo("B", "P"))
+	require_NoError(t, err)
+	defer nc.Close()
+
+	// By sending a request (regardless of no responders), this will trigger a wildcard _R_ subscription since
+	// we do not have a leafnode connected.
+	nc.PublishRequest("foo", "reply", nil)
+	nc.Flush()
+
+	// Now connect the LN. This will be where the service responder lives.
+	conf = createConfFile(t, []byte(`
+		port: -1
+		leaf {
+			remotes [ { url: "nats://A:P@127.0.0.1:17222" } ]
+		}
+	`))
+	ln, _ := RunServerWithConfig(conf)
+	defer ln.Shutdown()
+	checkLeafNodeConnected(t, s)
+
+	// Now attach a responder to the LN.
+	lnc, err := nats.Connect(ln.ClientURL())
+	require_NoError(t, err)
+	defer lnc.Close()
+
+	lnc.Subscribe("foo", func(m *nats.Msg) {
+		m.Respond([]byte("bar"))
+	})
+	lnc.Flush()
+
+	// Make sure it works, but request only wants one, so need second test to show failure, but
+	// want to make sure we are wired up correctly.
+	_, err = nc.Request("foo", nil, time.Second)
+	require_NoError(t, err)
+
+	// Now setup inbox reply so we can check if we get multiple responses.
+	reply := nats.NewInbox()
+	sub, err := nc.SubscribeSync(reply)
+	require_NoError(t, err)
+
+	nc.PublishRequest("foo", reply, nil)
+
+	// Do another to make sure we know the other request will have been processed too.
+	_, err = nc.Request("foo", nil, time.Second)
+	require_NoError(t, err)
+
+	if n, _, _ := sub.Pending(); n > 1 {
+		t.Fatalf("Expected only 1 response, got %d", n)
+	}
 }

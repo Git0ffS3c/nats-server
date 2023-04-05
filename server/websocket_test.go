@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2023 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/http"
@@ -1610,7 +1609,6 @@ func TestWSParseOptions(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			conf := createConfFile(t, []byte(test.content))
-			defer removeFile(t, conf)
 			o, err := ProcessConfigFile(conf)
 			if test.err != _EMPTY_ {
 				if err == nil || !strings.Contains(err.Error(), test.err) {
@@ -2014,7 +2012,7 @@ func testWSReadFrame(t testing.TB, br *bufio.Reader) []byte {
 	buf = append(buf, 0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0xff, 0xff)
 	dbr := bytes.NewBuffer(buf)
 	d := flate.NewReader(dbr)
-	uncompressed, err := ioutil.ReadAll(d)
+	uncompressed, err := io.ReadAll(d)
 	if err != nil {
 		t.Fatalf("Error reading frame: %v", err)
 	}
@@ -2086,7 +2084,6 @@ func TestWSPubSub(t *testing.T) {
 					ok = 1
 					continue
 				} else if ok == 1 && bytes.Contains(line, []byte("from nats")) {
-					ok = 2
 					break
 				}
 			}
@@ -3127,7 +3124,7 @@ func TestWSCompressionFrameSizeLimit(t *testing.T) {
 			buf = append(buf, 0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0xff, 0xff)
 			dbr := bytes.NewBuffer(buf)
 			d := flate.NewReader(dbr)
-			uncompressed, err := ioutil.ReadAll(d)
+			uncompressed, err := io.ReadAll(d)
 			if err != nil {
 				t.Fatalf("Error reading frame: %v", err)
 			}
@@ -3394,7 +3391,6 @@ func TestWSBindToProperAccount(t *testing.T) {
 			no_tls: true
 		}
 	`, jwt.ConnectionTypeStandard, strings.ToLower(jwt.ConnectionTypeWebsocket)))) // on purpose use lower case to ensure that it is converted.
-	defer removeFile(t, conf)
 	s, o := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
@@ -3867,7 +3863,6 @@ func TestWSReloadTLSConfig(t *testing.T) {
 	conf := createConfFile(t, []byte(fmt.Sprintf(template,
 		"../test/configs/certs/server-noip.pem",
 		"../test/configs/certs/server-key-noip.pem")))
-	defer removeFile(t, conf)
 
 	s, o := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -4051,7 +4046,6 @@ func wsBenchPub(b *testing.B, numPubs int, compress bool, payload string) {
 	s := RunServer(opts)
 	defer s.Shutdown()
 
-	n := b.N
 	extra := 0
 	pubProto := []byte(fmt.Sprintf("PUB %s %d\r\n%s\r\n", testWSBenchSubject, len(payload), payload))
 	singleOpBuf := testWSCreateClientMsg(wsBinaryMessage, 1, true, compress, pubProto)
@@ -4070,7 +4064,7 @@ func wsBenchPub(b *testing.B, numPubs int, compress bool, payload string) {
 		}
 	}
 	sendBuf := testWSCreateClientMsg(wsBinaryMessage, 1, true, compress, tmp)
-	n = b.N / pb
+	n := b.N / pb
 	extra = b.N - (n * pb)
 
 	wg := sync.WaitGroup{}

@@ -14,6 +14,7 @@
 package server
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -551,6 +552,13 @@ func checkBool(b, expected bool, t *testing.T) {
 	}
 }
 
+func checkError(err, expected error, t *testing.T) {
+	t.Helper()
+	if err != expected && err != nil && !errors.Is(err, expected) {
+		t.Fatalf("Expected %v, but got %v\n", expected, err)
+	}
+}
+
 func TestSublistValidLiteralSubjects(t *testing.T) {
 	checkBool(IsValidLiteralSubject("foo"), true, t)
 	checkBool(IsValidLiteralSubject(".foo"), false, t)
@@ -578,7 +586,7 @@ func TestSublistValidLiteralSubjects(t *testing.T) {
 	checkBool(IsValidLiteralSubject(">bar"), true, t)
 }
 
-func TestSublistValidlSubjects(t *testing.T) {
+func TestSublistValidSubjects(t *testing.T) {
 	checkBool(IsValidSubject("."), false, t)
 	checkBool(IsValidSubject(".foo"), false, t)
 	checkBool(IsValidSubject("foo."), false, t)
@@ -645,6 +653,28 @@ func TestSubjectIsLiteral(t *testing.T) {
 	checkBool(subjectIsLiteral("foo.*.>"), false, t)
 	checkBool(subjectIsLiteral("foo.*.bar"), false, t)
 	checkBool(subjectIsLiteral("foo.bar.>"), false, t)
+}
+
+func TestValidateDestinationSubject(t *testing.T) {
+	checkError(ValidateMappingDestination("foo"), nil, t)
+	checkError(ValidateMappingDestination("foo.bar"), nil, t)
+	checkError(ValidateMappingDestination("*"), nil, t)
+	checkError(ValidateMappingDestination(">"), nil, t)
+	checkError(ValidateMappingDestination("foo.*"), nil, t)
+	checkError(ValidateMappingDestination("foo.>"), nil, t)
+	checkError(ValidateMappingDestination("foo.*.>"), nil, t)
+	checkError(ValidateMappingDestination("foo.*.bar"), nil, t)
+	checkError(ValidateMappingDestination("foo.bar.>"), nil, t)
+	checkError(ValidateMappingDestination("foo.{{wildcard(1)}}"), nil, t)
+	checkError(ValidateMappingDestination("foo.{{ wildcard(1) }}"), nil, t)
+	checkError(ValidateMappingDestination("foo.{{wildcard( 1 )}}"), nil, t)
+	checkError(ValidateMappingDestination("foo.{{partition(2,1)}}"), nil, t)
+	checkError(ValidateMappingDestination("foo.{{SplitFromLeft(2,1)}}"), nil, t)
+	checkError(ValidateMappingDestination("foo.{{SplitFromRight(2,1)}}"), nil, t)
+	checkError(ValidateMappingDestination("foo.{{unknown(1)}}"), ErrInvalidMappingDestination, t)
+	checkError(ValidateMappingDestination("foo..}"), ErrInvalidMappingDestination, t)
+	checkError(ValidateMappingDestination("foo. bar}"), ErrInvalidMappingDestinationSubject, t)
+
 }
 
 func TestSubjectToken(t *testing.T) {
@@ -1045,6 +1075,7 @@ func TestIsSubsetMatch(t *testing.T) {
 		test    string
 		result  bool
 	}{
+		{"foo.bar", "foo.bar", true},
 		{"foo.*", ">", true},
 		{"foo.*", "*.*", true},
 		{"foo.*", "foo.*", true},
@@ -1095,7 +1126,7 @@ func TestSublistRegisterInterestNotification(t *testing.T) {
 	}
 
 	tt := time.NewTimer(time.Second)
-	expectBool := func(b bool) {
+	expectBoolWithCh := func(ch chan bool, b bool) {
 		t.Helper()
 		tt.Reset(time.Second)
 		defer tt.Stop()
@@ -1107,6 +1138,10 @@ func TestSublistRegisterInterestNotification(t *testing.T) {
 		case <-tt.C:
 			t.Fatalf("Timeout waiting for expected value")
 		}
+	}
+	expectBool := func(b bool) {
+		t.Helper()
+		expectBoolWithCh(ch, b)
 	}
 	expectFalse := func() {
 		t.Helper()
@@ -1122,11 +1157,15 @@ func TestSublistRegisterInterestNotification(t *testing.T) {
 			t.Fatalf("Expected no notifications, had %d and first was %v", lch, <-ch)
 		}
 	}
-	expectOne := func() {
+	expectOneWithCh := func(ch chan bool) {
 		t.Helper()
 		if len(ch) != 1 {
 			t.Fatalf("Expected 1 notification")
 		}
+	}
+	expectOne := func() {
+		t.Helper()
+		expectOneWithCh(ch)
 	}
 
 	expectOne()
@@ -1318,6 +1357,43 @@ func TestSublistRegisterInterestNotification(t *testing.T) {
 		t.Fatalf("Expected to return true")
 	}
 
+	if err := s.RegisterQueueNotification("some.subject", "queue1", ch); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	expectOne()
+	expectFalse()
+
+	qsub1 = newQSub("some.subject", "queue1")
+	s.Insert(qsub1)
+	expectTrue()
+
+	// Create a second channel for this other queue
+	ch2 := make(chan bool, 1)
+	if err := s.RegisterQueueNotification("some.subject", "queue2", ch2); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	expectOneWithCh(ch2)
+	expectBoolWithCh(ch2, false)
+
+	qsub2 = newQSub("some.subject", "queue2")
+	s.Insert(qsub2)
+	expectBoolWithCh(ch2, true)
+
+	// But we should not get notification on queue1
+	expectNone()
+
+	s.Remove(qsub1)
+	expectFalse()
+	s.Remove(qsub2)
+	expectBoolWithCh(ch2, false)
+
+	if !s.ClearQueueNotification("some.subject", "queue1", ch) {
+		t.Fatalf("Expected to return true")
+	}
+	if !s.ClearQueueNotification("some.subject", "queue2", ch2) {
+		t.Fatalf("Expected to return true")
+	}
+
 	// Test non-blocking notifications.
 	if err := s.RegisterNotification("bar", ch); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -1426,6 +1502,39 @@ func TestSublistMatchWithEmptyTokens(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSublistSubjectCollide(t *testing.T) {
+	require_False(t, SubjectsCollide("foo.*", "foo.*.bar.>"))
+	require_False(t, SubjectsCollide("foo.*.bar.>", "foo.*"))
+	require_True(t, SubjectsCollide("foo.*", "foo.foo"))
+	require_True(t, SubjectsCollide("foo.*", "*.foo"))
+	require_True(t, SubjectsCollide("foo.bar.>", "*.bar.foo"))
+}
+
+func TestSublistAddCacheHitRate(t *testing.T) {
+	sl1 := NewSublistWithCache()
+	fooSub := newSub("foo")
+	sl1.Insert(fooSub)
+	for i := 0; i < 4; i++ {
+		sl1.Match("foo")
+	}
+	stats1 := sl1.Stats()
+	require_True(t, stats1.CacheHitRate == 0.75)
+
+	sl2 := NewSublistWithCache()
+	barSub := newSub("bar")
+	sl2.Insert(barSub)
+	for i := 0; i < 4; i++ {
+		sl2.Match("bar")
+	}
+	stats2 := sl2.Stats()
+	require_True(t, stats2.CacheHitRate == 0.75)
+
+	ts := &SublistStats{}
+	ts.add(stats1)
+	ts.add(stats2)
+	require_True(t, ts.CacheHitRate == 0.75)
 }
 
 // -- Benchmarks Setup --

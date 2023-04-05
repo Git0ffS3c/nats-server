@@ -1,4 +1,4 @@
-// Copyright 2019-2021 The NATS Authors
+// Copyright 2019-2023 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,6 +16,7 @@ package server
 import (
 	"bytes"
 	"fmt"
+	"math/rand"
 	"reflect"
 	"testing"
 	"time"
@@ -45,15 +46,15 @@ func TestMemStoreBasics(t *testing.T) {
 	if state.Bytes != expectedSize {
 		t.Fatalf("Expected %d bytes, got %d", expectedSize, state.Bytes)
 	}
-	nsubj, _, nmsg, _, err := ms.LoadMsg(1)
+	sm, err := ms.LoadMsg(1, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error looking up msg: %v", err)
 	}
-	if nsubj != subj {
-		t.Fatalf("Subjects don't match, original %q vs %q", subj, nsubj)
+	if sm.subj != subj {
+		t.Fatalf("Subjects don't match, original %q vs %q", subj, sm.subj)
 	}
-	if !bytes.Equal(nmsg, msg) {
-		t.Fatalf("Msgs don't match, original %q vs %q", msg, nmsg)
+	if !bytes.Equal(sm.msg, msg) {
+		t.Fatalf("Msgs don't match, original %q vs %q", msg, sm.msg)
 	}
 }
 
@@ -84,7 +85,7 @@ func TestMemStoreMsgLimit(t *testing.T) {
 		t.Fatalf("Expected the first sequence to be 2 now, but got %d", state.FirstSeq)
 	}
 	// Make sure we can not lookup seq 1.
-	if _, _, _, _, err := ms.LoadMsg(1); err == nil {
+	if _, err := ms.LoadMsg(1, nil); err == nil {
 		t.Fatalf("Expected error looking up seq 1 but got none")
 	}
 }
@@ -186,16 +187,17 @@ func TestMemStoreTimeStamps(t *testing.T) {
 		time.Sleep(5 * time.Microsecond)
 		ms.StoreMsg(subj, nil, msg)
 	}
+	var smv StoreMsg
 	for seq := uint64(1); seq <= 10; seq++ {
-		_, _, _, ts, err := ms.LoadMsg(seq)
+		sm, err := ms.LoadMsg(seq, &smv)
 		if err != nil {
 			t.Fatalf("Unexpected error looking up msg: %v", err)
 		}
 		// These should be different
-		if ts <= last {
-			t.Fatalf("Expected different timestamps, got %v", ts)
+		if sm.ts <= last {
+			t.Fatalf("Expected different timestamps, got %v", sm.ts)
 		}
-		last = ts
+		last = sm.ts
 	}
 }
 
@@ -265,12 +267,12 @@ func TestMemStoreEraseMsg(t *testing.T) {
 	}
 	subj, msg := "foo", []byte("Hello World")
 	ms.StoreMsg(subj, nil, msg)
-	_, _, smsg, _, err := ms.LoadMsg(1)
+	sm, err := ms.LoadMsg(1, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error looking up msg: %v", err)
 	}
-	if !bytes.Equal(msg, smsg) {
-		t.Fatalf("Expected same msg, got %q vs %q", smsg, msg)
+	if !bytes.Equal(msg, sm.msg) {
+		t.Fatalf("Expected same msg, got %q vs %q", sm.msg, msg)
 	}
 	if removed, _ := ms.EraseMsg(1); !removed {
 		t.Fatalf("Expected erase msg to return success")
@@ -287,15 +289,15 @@ func TestMemStoreMsgHeaders(t *testing.T) {
 		t.Fatalf("Wrong size for stored msg with header")
 	}
 	ms.StoreMsg(subj, hdr, msg)
-	_, shdr, smsg, _, err := ms.LoadMsg(1)
+	sm, err := ms.LoadMsg(1, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error looking up msg: %v", err)
 	}
-	if !bytes.Equal(msg, smsg) {
-		t.Fatalf("Expected same msg, got %q vs %q", smsg, msg)
+	if !bytes.Equal(msg, sm.msg) {
+		t.Fatalf("Expected same msg, got %q vs %q", sm.msg, msg)
 	}
-	if !bytes.Equal(hdr, shdr) {
-		t.Fatalf("Expected same hdr, got %q vs %q", shdr, hdr)
+	if !bytes.Equal(hdr, sm.hdr) {
+		t.Fatalf("Expected same hdr, got %q vs %q", sm.hdr, hdr)
 	}
 	if removed, _ := ms.EraseMsg(1); !removed {
 		t.Fatalf("Expected erase msg to return success")
@@ -352,12 +354,19 @@ func TestMemStoreStreamTruncate(t *testing.T) {
 		t.Fatalf("Unexpected error creating store: %v", err)
 	}
 
+	tseq := uint64(50)
+
 	subj, toStore := "foo", uint64(100)
-	for i := uint64(1); i <= toStore; i++ {
-		if _, _, err := ms.StoreMsg(subj, nil, []byte("ok")); err != nil {
-			t.Fatalf("Error storing msg: %v", err)
-		}
+	for i := uint64(1); i < tseq; i++ {
+		_, _, err := ms.StoreMsg(subj, nil, []byte("ok"))
+		require_NoError(t, err)
 	}
+	subj = "bar"
+	for i := tseq; i <= toStore; i++ {
+		_, _, err := ms.StoreMsg(subj, nil, []byte("ok"))
+		require_NoError(t, err)
+	}
+
 	if state := ms.State(); state.Msgs != toStore {
 		t.Fatalf("Expected %d msgs, got %d", toStore, state.Msgs)
 	}
@@ -367,7 +376,6 @@ func TestMemStoreStreamTruncate(t *testing.T) {
 		t.Fatalf("Expected err of '%v', got '%v'", ErrInvalidSequence, err)
 	}
 
-	tseq := uint64(50)
 	if err := ms.Truncate(tseq); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -385,8 +393,331 @@ func TestMemStoreStreamTruncate(t *testing.T) {
 	if err := ms.Truncate(tseq); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
+	state := ms.State()
+	if state.Msgs != tseq-2 {
+		t.Fatalf("Expected %d msgs, got %d", tseq-2, state.Msgs)
+	}
+	if state.NumSubjects != 1 {
+		t.Fatalf("Expected only 1 subject, got %d", state.NumSubjects)
+	}
 	expected := []uint64{10, 20}
-	if state := ms.State(); !reflect.DeepEqual(state.Deleted, expected) {
+	if !reflect.DeepEqual(state.Deleted, expected) {
 		t.Fatalf("Expected deleted to be %+v, got %+v\n", expected, state.Deleted)
+	}
+}
+
+func TestMemStorePurgeExWithSubject(t *testing.T) {
+	ms, err := newMemStore(&StreamConfig{Storage: MemoryStorage})
+	require_NoError(t, err)
+
+	for i := 0; i < 100; i++ {
+		_, _, err = ms.StoreMsg("foo", nil, nil)
+		require_NoError(t, err)
+	}
+
+	// This should purge all.
+	ms.PurgeEx("foo", 1, 0)
+	require_True(t, ms.State().Msgs == 0)
+}
+
+func TestMemStoreUpdateMaxMsgsPerSubject(t *testing.T) {
+	cfg := &StreamConfig{
+		Name:       "TEST",
+		Storage:    MemoryStorage,
+		Subjects:   []string{"foo"},
+		MaxMsgsPer: 10,
+	}
+	ms, err := newMemStore(cfg)
+	require_NoError(t, err)
+
+	// Make sure this is honored on an update.
+	cfg.MaxMsgsPer = 50
+	err = ms.UpdateConfig(cfg)
+	require_NoError(t, err)
+
+	numStored := 22
+	for i := 0; i < numStored; i++ {
+		_, _, err = ms.StoreMsg("foo", nil, nil)
+		require_NoError(t, err)
+	}
+
+	ss := ms.SubjectsState("foo")["foo"]
+	if ss.Msgs != uint64(numStored) {
+		t.Fatalf("Expected to have %d stored, got %d", numStored, ss.Msgs)
+	}
+
+	// Now make sure we trunk if setting to lower value.
+	cfg.MaxMsgsPer = 10
+	err = ms.UpdateConfig(cfg)
+	require_NoError(t, err)
+
+	ss = ms.SubjectsState("foo")["foo"]
+	if ss.Msgs != 10 {
+		t.Fatalf("Expected to have %d stored, got %d", 10, ss.Msgs)
+	}
+}
+
+func TestMemStoreStreamTruncateReset(t *testing.T) {
+	cfg := &StreamConfig{
+		Name:     "TEST",
+		Storage:  MemoryStorage,
+		Subjects: []string{"foo"},
+	}
+	ms, err := newMemStore(cfg)
+	require_NoError(t, err)
+
+	subj, msg := "foo", []byte("Hello World")
+	for i := 0; i < 1000; i++ {
+		_, _, err := ms.StoreMsg(subj, nil, msg)
+		require_NoError(t, err)
+	}
+
+	// Reset everything
+	require_NoError(t, ms.Truncate(0))
+
+	state := ms.State()
+	require_True(t, state.Msgs == 0)
+	require_True(t, state.Bytes == 0)
+	require_True(t, state.FirstSeq == 0)
+	require_True(t, state.LastSeq == 0)
+	require_True(t, state.NumSubjects == 0)
+	require_True(t, state.NumDeleted == 0)
+
+	for i := 0; i < 1000; i++ {
+		_, _, err := ms.StoreMsg(subj, nil, msg)
+		require_NoError(t, err)
+	}
+
+	state = ms.State()
+	require_True(t, state.Msgs == 1000)
+	require_True(t, state.Bytes == 30000)
+	require_True(t, state.FirstSeq == 1)
+	require_True(t, state.LastSeq == 1000)
+	require_True(t, state.NumSubjects == 1)
+	require_True(t, state.NumDeleted == 0)
+}
+
+func TestMemStoreStreamCompactMultiBlockSubjectInfo(t *testing.T) {
+	cfg := &StreamConfig{
+		Name:     "TEST",
+		Storage:  MemoryStorage,
+		Subjects: []string{"foo.*"},
+	}
+	ms, err := newMemStore(cfg)
+	require_NoError(t, err)
+
+	for i := 0; i < 1000; i++ {
+		subj := fmt.Sprintf("foo.%d", i)
+		_, _, err := ms.StoreMsg(subj, nil, []byte("Hello World"))
+		require_NoError(t, err)
+	}
+
+	// Compact such that we know we throw blocks away from the beginning.
+	deleted, err := ms.Compact(501)
+	require_NoError(t, err)
+	require_True(t, deleted == 500)
+
+	// Make sure we adjusted for subjects etc.
+	state := ms.State()
+	require_True(t, state.NumSubjects == 500)
+}
+
+func TestMemStoreSubjectsTotals(t *testing.T) {
+	cfg := &StreamConfig{
+		Name:     "TEST",
+		Storage:  MemoryStorage,
+		Subjects: []string{"*.*"},
+	}
+	ms, err := newMemStore(cfg)
+	require_NoError(t, err)
+
+	fmap := make(map[int]int)
+	bmap := make(map[int]int)
+
+	var m map[int]int
+	var ft string
+
+	for i := 0; i < 10_000; i++ {
+		// Flip coin for prefix
+		if rand.Intn(2) == 0 {
+			ft, m = "foo", fmap
+		} else {
+			ft, m = "bar", bmap
+		}
+		dt := rand.Intn(100)
+		subj := fmt.Sprintf("%s.%d", ft, dt)
+		m[dt]++
+
+		_, _, err := ms.StoreMsg(subj, nil, []byte("Hello World"))
+		require_NoError(t, err)
+	}
+
+	// Now test SubjectsTotal
+	for dt, total := range fmap {
+		subj := fmt.Sprintf("foo.%d", dt)
+		m := ms.SubjectsTotals(subj)
+		if m[subj] != uint64(total) {
+			t.Fatalf("Expected %q to have %d total, got %d", subj, total, m[subj])
+		}
+	}
+
+	// Check fmap.
+	if st := ms.SubjectsTotals("foo.*"); len(st) != len(fmap) {
+		t.Fatalf("Expected %d subjects for %q, got %d", len(fmap), "foo.*", len(st))
+	} else {
+		expected := 0
+		for _, n := range fmap {
+			expected += n
+		}
+		received := uint64(0)
+		for _, n := range st {
+			received += n
+		}
+		if received != uint64(expected) {
+			t.Fatalf("Expected %d total but got %d", expected, received)
+		}
+	}
+
+	// Check bmap.
+	if st := ms.SubjectsTotals("bar.*"); len(st) != len(bmap) {
+		t.Fatalf("Expected %d subjects for %q, got %d", len(bmap), "bar.*", len(st))
+	} else {
+		expected := 0
+		for _, n := range bmap {
+			expected += n
+		}
+		received := uint64(0)
+		for _, n := range st {
+			received += n
+		}
+		if received != uint64(expected) {
+			t.Fatalf("Expected %d total but got %d", expected, received)
+		}
+	}
+
+	// All with pwc match.
+	if st, expected := ms.SubjectsTotals("*.*"), len(bmap)+len(fmap); len(st) != expected {
+		t.Fatalf("Expected %d subjects for %q, got %d", expected, "*.*", len(st))
+	}
+}
+
+func TestMemStoreNumPending(t *testing.T) {
+	cfg := &StreamConfig{
+		Name:     "TEST",
+		Storage:  MemoryStorage,
+		Subjects: []string{"*.*.*.*"},
+	}
+	ms, err := newMemStore(cfg)
+	require_NoError(t, err)
+
+	tokens := []string{"foo", "bar", "baz"}
+	genSubj := func() string {
+		return fmt.Sprintf("%s.%s.%s.%s",
+			tokens[rand.Intn(len(tokens))],
+			tokens[rand.Intn(len(tokens))],
+			tokens[rand.Intn(len(tokens))],
+			tokens[rand.Intn(len(tokens))],
+		)
+	}
+
+	for i := 0; i < 50_000; i++ {
+		subj := genSubj()
+		_, _, err := ms.StoreMsg(subj, nil, []byte("Hello World"))
+		require_NoError(t, err)
+	}
+
+	state := ms.State()
+
+	// Scan one by one for sanity check against other calculations.
+	sanityCheck := func(sseq uint64, filter string) SimpleState {
+		t.Helper()
+		var ss SimpleState
+		var smv StoreMsg
+		// For here we know 0 is invalid, set to 1.
+		if sseq == 0 {
+			sseq = 1
+		}
+		for seq := sseq; seq <= state.LastSeq; seq++ {
+			sm, err := ms.LoadMsg(seq, &smv)
+			if err != nil {
+				t.Logf("Encountered error %v loading sequence: %d", err, seq)
+				continue
+			}
+			if subjectIsSubsetMatch(sm.subj, filter) {
+				ss.Msgs++
+				ss.Last = seq
+				if ss.First == 0 || seq < ss.First {
+					ss.First = seq
+				}
+			}
+		}
+		return ss
+	}
+
+	check := func(sseq uint64, filter string) {
+		t.Helper()
+		np, lvs := ms.NumPending(sseq, filter, false)
+		ss := ms.FilteredState(sseq, filter)
+		sss := sanityCheck(sseq, filter)
+		if lvs != state.LastSeq {
+			t.Fatalf("Expected NumPending to return valid through last of %d but got %d", state.LastSeq, lvs)
+		}
+		if ss.Msgs != np {
+			t.Fatalf("NumPending of %d did not match ss.Msgs of %d", np, ss.Msgs)
+		}
+		if ss != sss {
+			t.Fatalf("Failed sanity check, expected %+v got %+v", sss, ss)
+		}
+	}
+
+	sanityCheckLastOnly := func(sseq uint64, filter string) SimpleState {
+		t.Helper()
+		var ss SimpleState
+		var smv StoreMsg
+		// For here we know 0 is invalid, set to 1.
+		if sseq == 0 {
+			sseq = 1
+		}
+		seen := make(map[string]bool)
+		for seq := state.LastSeq; seq >= sseq; seq-- {
+			sm, err := ms.LoadMsg(seq, &smv)
+			if err != nil {
+				t.Logf("Encountered error %v loading sequence: %d", err, seq)
+				continue
+			}
+			if !seen[sm.subj] && subjectIsSubsetMatch(sm.subj, filter) {
+				ss.Msgs++
+				if ss.Last == 0 {
+					ss.Last = seq
+				}
+				if ss.First == 0 || seq < ss.First {
+					ss.First = seq
+				}
+				seen[sm.subj] = true
+			}
+		}
+		return ss
+	}
+
+	checkLastOnly := func(sseq uint64, filter string) {
+		t.Helper()
+		np, lvs := ms.NumPending(sseq, filter, true)
+		ss := sanityCheckLastOnly(sseq, filter)
+		if lvs != state.LastSeq {
+			t.Fatalf("Expected NumPending to return valid through last of %d but got %d", state.LastSeq, lvs)
+		}
+		if ss.Msgs != np {
+			t.Fatalf("NumPending of %d did not match ss.Msgs of %d", np, ss.Msgs)
+		}
+	}
+
+	startSeqs := []uint64{0, 1, 2, 200, 444, 555, 2222, 8888, 12_345, 28_222, 33_456, 44_400, 49_999}
+	checkSubs := []string{"foo.>", "*.bar.>", "foo.bar.*.baz", "*.bar.>", "*.foo.bar.*", "foo.foo.bar.baz"}
+
+	for _, filter := range checkSubs {
+		for _, start := range startSeqs {
+			check(start, filter)
+			checkLastOnly(start, filter)
+		}
 	}
 }
