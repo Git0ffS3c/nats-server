@@ -19784,3 +19784,280 @@ func TestJetStreamConsumerAckFloorWithExpired(t *testing.T) {
 	require_True(t, ci.NumPending == 0)
 	require_True(t, ci.NumRedelivered == 0)
 }
+
+func TestJetStreamConsumerWithFormattingSymbol(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "Test%123",
+		Subjects: []string{"foo"},
+	})
+	require_NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		sendStreamMsg(t, nc, "foo", "OK")
+	}
+
+	_, err = js.AddConsumer("Test%123", &nats.ConsumerConfig{
+		Durable:        "Test%123",
+		FilterSubject:  "foo",
+		DeliverSubject: "bar",
+	})
+	require_NoError(t, err)
+
+	sub, err := js.SubscribeSync("foo", nats.Bind("Test%123", "Test%123"))
+	require_NoError(t, err)
+
+	_, err = sub.NextMsg(time.Second * 5)
+	require_NoError(t, err)
+}
+
+func TestJetStreamStreamUpdateWithExternalSource(t *testing.T) {
+	ho := DefaultTestOptions
+	ho.Port = -1
+	ho.LeafNode.Host = "127.0.0.1"
+	ho.LeafNode.Port = -1
+	ho.JetStream = true
+	ho.JetStreamDomain = "hub"
+	ho.StoreDir = t.TempDir()
+	hs := RunServer(&ho)
+	defer hs.Shutdown()
+
+	lu, err := url.Parse(fmt.Sprintf("nats://127.0.0.1:%d", ho.LeafNode.Port))
+	require_NoError(t, err)
+
+	lo1 := DefaultTestOptions
+	lo1.Port = -1
+	lo1.ServerName = "a-leaf"
+	lo1.JetStream = true
+	lo1.StoreDir = t.TempDir()
+	lo1.JetStreamDomain = "a-leaf"
+	lo1.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{lu}}}
+	l1 := RunServer(&lo1)
+	defer l1.Shutdown()
+
+	checkLeafNodeConnected(t, l1)
+
+	// Test sources with `External` provided
+	ncl, jsl := jsClientConnect(t, l1)
+	defer ncl.Close()
+
+	// Hub stream.
+	_, err = jsl.AddStream(&nats.StreamConfig{Name: "stream", Subjects: []string{"leaf"}})
+	require_NoError(t, err)
+
+	nch, jsh := jsClientConnect(t, hs)
+	defer nch.Close()
+
+	// Leaf stream.
+	// Both streams uses the same name, as we're testing if overlap does not check against itself
+	// if `External` stream has the same name.
+	_, err = jsh.AddStream(&nats.StreamConfig{
+		Name:     "stream",
+		Subjects: []string{"hub"},
+	})
+	require_NoError(t, err)
+
+	// Add `Sources`.
+	// This should not validate subjects overlap against itself.
+	_, err = jsh.UpdateStream(&nats.StreamConfig{
+		Name:     "stream",
+		Subjects: []string{"hub"},
+		Sources: []*nats.StreamSource{
+			{
+				Name:          "stream",
+				FilterSubject: "leaf",
+				External: &nats.ExternalStream{
+					APIPrefix: "$JS.a-leaf.API",
+				},
+			},
+		},
+	})
+	require_NoError(t, err)
+
+	// Specifying not existing FilterSubject should also be fine, as we do not validate `External` stream.
+	_, err = jsh.UpdateStream(&nats.StreamConfig{
+		Name:     "stream",
+		Subjects: []string{"hub"},
+		Sources: []*nats.StreamSource{
+			{
+				Name:          "stream",
+				FilterSubject: "foo",
+				External: &nats.ExternalStream{
+					APIPrefix: "$JS.a-leaf.API",
+				},
+			},
+		},
+	})
+	require_NoError(t, err)
+
+	// Add one more stream to the Hub, so when we source it, it is not `External`.
+	_, err = jsh.AddStream(&nats.StreamConfig{Name: "other", Subjects: []string{"other"}})
+	require_NoError(t, err)
+
+	_, err = jsh.UpdateStream(&nats.StreamConfig{
+		Name:     "stream",
+		Subjects: []string{"hub"},
+		Sources: []*nats.StreamSource{
+			{
+				Name:          "other",
+				FilterSubject: "foo",
+			},
+		},
+	})
+	require_Error(t, err)
+	require_True(t, strings.Contains(err.Error(), "does not overlap"))
+}
+
+func TestJetStreamKVHistoryRegression(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	for _, storage := range []nats.StorageType{nats.FileStorage, nats.MemoryStorage} {
+		t.Run(storage.String(), func(t *testing.T) {
+			js.DeleteKeyValue("TEST")
+
+			kv, err := js.CreateKeyValue(&nats.KeyValueConfig{
+				Bucket:  "TEST",
+				History: 4,
+				Storage: storage,
+			})
+			require_NoError(t, err)
+
+			r1, err := kv.Create("foo", []byte("a"))
+			require_NoError(t, err)
+
+			_, err = kv.Update("foo", []byte("ab"), r1)
+			require_NoError(t, err)
+
+			err = kv.Delete("foo")
+			require_NoError(t, err)
+
+			_, err = kv.Create("foo", []byte("abc"))
+			require_NoError(t, err)
+
+			err = kv.Delete("foo")
+			require_NoError(t, err)
+
+			history, err := kv.History("foo")
+			require_NoError(t, err)
+			require_True(t, len(history) == 4)
+
+			_, err = kv.Update("foo", []byte("abcd"), history[len(history)-1].Revision())
+			require_NoError(t, err)
+
+			err = kv.Purge("foo")
+			require_NoError(t, err)
+
+			_, err = kv.Create("foo", []byte("abcde"))
+			require_NoError(t, err)
+
+			err = kv.Purge("foo")
+			require_NoError(t, err)
+
+			history, err = kv.History("foo")
+			require_NoError(t, err)
+			require_True(t, len(history) == 1)
+		})
+	}
+}
+
+func TestJetStreamSnapshotRestoreStallAndHealthz(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "ORDERS",
+		Subjects: []string{"orders.*"},
+	})
+	require_NoError(t, err)
+
+	for i := 0; i < 1000; i++ {
+		sendStreamMsg(t, nc, "orders.created", "new order")
+	}
+
+	hs := s.healthz(nil)
+	if hs.Status != "ok" || hs.Error != _EMPTY_ {
+		t.Fatalf("Expected health to be ok, got %+v", hs)
+	}
+
+	// Simulate the staging directory for restores. This is normally cleaned up
+	// but since its at the root of the storage directory make sure healthz is not affected.
+	snapDir := filepath.Join(s.getJetStream().config.StoreDir, snapStagingDir)
+	require_NoError(t, os.MkdirAll(snapDir, defaultDirPerms))
+
+	// Make sure healthz ok.
+	hs = s.healthz(nil)
+	if hs.Status != "ok" || hs.Error != _EMPTY_ {
+		t.Fatalf("Expected health to be ok, got %+v", hs)
+	}
+}
+
+// https://github.com/nats-io/nats-server/pull/4163
+func TestJetStreamMaxBytesIgnored(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"*"},
+		MaxBytes: 10 * 1024 * 1024,
+	})
+	require_NoError(t, err)
+
+	msg := bytes.Repeat([]byte("A"), 1024*1024)
+
+	for i := 0; i < 10; i++ {
+		_, err := js.Publish("x", msg)
+		require_NoError(t, err)
+	}
+
+	si, err := js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_True(t, si.State.Msgs == 9)
+
+	// Stop current
+	sd := s.JetStreamConfig().StoreDir
+	s.Shutdown()
+
+	// We will remove the idx file and truncate the blk and fss files.
+	mdir := filepath.Join(sd, "$G", "streams", "TEST", "msgs")
+	// Remove idx
+	err = os.Remove(filepath.Join(mdir, "1.idx"))
+	require_NoError(t, err)
+	// Truncate fss
+	err = os.WriteFile(filepath.Join(mdir, "1.fss"), nil, defaultFilePerms)
+	require_NoError(t, err)
+	// Truncate blk
+	err = os.WriteFile(filepath.Join(mdir, "1.blk"), nil, defaultFilePerms)
+	require_NoError(t, err)
+
+	// Restart.
+	s = RunJetStreamServerOnPort(-1, sd)
+	defer s.Shutdown()
+
+	nc, js = jsClientConnect(t, s)
+	defer nc.Close()
+
+	for i := 0; i < 10; i++ {
+		_, err := js.Publish("x", msg)
+		require_NoError(t, err)
+	}
+
+	si, err = js.StreamInfo("TEST")
+	require_NoError(t, err)
+	require_True(t, si.State.Bytes <= 10*1024*1024)
+}

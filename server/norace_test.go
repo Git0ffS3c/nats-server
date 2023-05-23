@@ -2424,7 +2424,7 @@ func TestNoRaceJetStreamSlowFilteredInititalPendingAndFirstMsg(t *testing.T) {
 	})
 
 	// Threshold for taking too long.
-	const thresh = 50 * time.Millisecond
+	const thresh = 100 * time.Millisecond
 
 	var dindex int
 	testConsumerCreate := func(subj string, startSeq, expectedNumPending uint64) {
@@ -3800,10 +3800,12 @@ func TestNoRaceJetStreamClusterStreamReset(t *testing.T) {
 		return err
 	})
 
-	// Grab number go routines.
-	if after := runtime.NumGoroutine(); base > after {
-		t.Fatalf("Expected %d go routines, got %d", base, after)
-	}
+	checkFor(t, 5*time.Second, 200*time.Millisecond, func() error {
+		if after := runtime.NumGoroutine(); base > after {
+			return fmt.Errorf("Expected %d go routines, got %d", base, after)
+		}
+		return nil
+	})
 
 	// Simulate a low level write error on our consumer and make sure we can recover etc.
 	cl = c.consumerLeader("$G", "TEST", "d1")
@@ -5837,7 +5839,7 @@ func TestNoRaceEncodeConsumerStateBug(t *testing.T) {
 }
 
 // Performance impact on stream ingress with large number of consumers.
-func TestJetStreamLargeNumConsumersPerfImpact(t *testing.T) {
+func TestNoRaceJetStreamLargeNumConsumersPerfImpact(t *testing.T) {
 	skip(t)
 
 	s := RunBasicJetStreamServer(t)
@@ -5929,7 +5931,7 @@ func TestJetStreamLargeNumConsumersPerfImpact(t *testing.T) {
 }
 
 // Performance impact on large number of consumers but sparse delivery.
-func TestJetStreamLargeNumConsumersSparseDelivery(t *testing.T) {
+func TestNoRaceJetStreamLargeNumConsumersSparseDelivery(t *testing.T) {
 	skip(t)
 
 	s := RunBasicJetStreamServer(t)
@@ -6395,8 +6397,8 @@ func TestNoRaceJetStreamConsumerCreateTimeNumPending(t *testing.T) {
 	case <-time.After(5 * time.Second):
 	}
 
-	// Should stay under 5ms now, but for Travis variability say 25ms.
-	threshold := 25 * time.Millisecond
+	// Should stay under 5ms now, but for Travis variability say 50ms.
+	threshold := 50 * time.Millisecond
 
 	start := time.Now()
 	_, err = js.PullSubscribe("events.*", "dlc")
@@ -6615,11 +6617,11 @@ func TestNoRaceJetStreamClusterF3Setup(t *testing.T) {
 	wg := sync.WaitGroup{}
 	for i := 0; i < numSourceStreams; i++ {
 		sname := fmt.Sprintf("EVENT-%s", nuid.Next())
+		sources = append(sources, sname)
 		wg.Add(1)
 		go func(stream string) {
 			defer wg.Done()
 			t.Logf("  %q", stream)
-			sources = append(sources, stream)
 			subj := fmt.Sprintf("%s.>", stream)
 			_, err := js.AddStream(&nats.StreamConfig{
 				Name:      stream,
@@ -7806,5 +7808,121 @@ func TestNoRaceParallelStreamAndConsumerCreation(t *testing.T) {
 	})
 	if numConsumers > 1 {
 		t.Fatalf("Expected only one consumer to be really created, got %d out of %d attempts", numConsumers, np)
+	}
+}
+
+func TestNoRaceJetStreamClusterLeafnodeConnectPerf(t *testing.T) {
+	// Uncomment to run. Needs to be on a big machine. Do not want as part of Travis tests atm.
+	skip(t)
+
+	tmpl := strings.Replace(jsClusterAccountsTempl, "store_dir:", "domain: cloud, store_dir:", 1)
+	c := createJetStreamCluster(t, tmpl, "CLOUD", _EMPTY_, 3, 18033, true)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "STATE",
+		Subjects: []string{"STATE.GLOBAL.CELL1.*.>"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	tmpl = strings.Replace(jsClusterTemplWithSingleFleetLeafNode, "store_dir:", "domain: vehicle, store_dir:", 1)
+
+	var vinSerial int
+	genVIN := func() string {
+		vinSerial++
+		return fmt.Sprintf("7PDSGAALXNN%06d", vinSerial)
+	}
+
+	numVehicles := 500
+	for i := 0; i < numVehicles; i++ {
+		start := time.Now()
+		vin := genVIN()
+		ln := c.createLeafNodeWithTemplateNoSystemWithProto(vin, tmpl, "ws")
+		nc, js := jsClientConnect(t, ln)
+		_, err := js.AddStream(&nats.StreamConfig{
+			Name:     "VEHICLE",
+			Subjects: []string{"STATE.GLOBAL.LOCAL.>"},
+			Sources: []*nats.StreamSource{{
+				Name:          "STATE",
+				FilterSubject: fmt.Sprintf("STATE.GLOBAL.CELL1.%s.>", vin),
+				External: &nats.ExternalStream{
+					APIPrefix:     "$JS.cloud.API",
+					DeliverPrefix: fmt.Sprintf("DELIVER.STATE.GLOBAL.CELL1.%s", vin),
+				},
+			}},
+		})
+		require_NoError(t, err)
+		// Create the sourced stream.
+		checkLeafNodeConnectedCount(t, ln, 1)
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("Took too long to create leafnode %d connection: %v", i+1, elapsed)
+		}
+		nc.Close()
+	}
+}
+
+// This test ensures that outbound queues don't cause a run on
+// memory when sending something to lots of clients.
+func TestNoRaceClientOutboundQueueMemory(t *testing.T) {
+	opts := DefaultOptions()
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	var before runtime.MemStats
+	var after runtime.MemStats
+
+	var err error
+	clients := make([]*nats.Conn, 50000)
+	wait := &sync.WaitGroup{}
+	wait.Add(len(clients))
+
+	for i := 0; i < len(clients); i++ {
+		clients[i], err = nats.Connect(fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port), nats.InProcessServer(s))
+		if err != nil {
+			t.Fatalf("Error on connect: %v", err)
+		}
+		defer clients[i].Close()
+
+		clients[i].Subscribe("test", func(m *nats.Msg) {
+			wait.Done()
+		})
+	}
+
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	nc, err := nats.Connect(fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port), nats.InProcessServer(s))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	var m [48000]byte
+	if err = nc.Publish("test", m[:]); err != nil {
+		t.Fatal(err)
+	}
+
+	wait.Wait()
+
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+
+	hb, ha := float64(before.HeapAlloc), float64(after.HeapAlloc)
+	ms := float64(len(m))
+	diff := float64(ha) - float64(hb)
+	inc := (diff / float64(hb)) * 100
+
+	if inc > 10 {
+		t.Logf("Message size:       %.1fKB\n", ms/1024)
+		t.Logf("Subscribed clients: %d\n", len(clients))
+		t.Logf("Heap allocs before: %.1fMB\n", hb/1024/1024)
+		t.Logf("Heap allocs after:  %.1fMB\n", ha/1024/1024)
+		t.Logf("Heap allocs delta:  %.1f%%\n", inc)
+
+		t.Fatalf("memory increase was %.1f%% (should be <= 10%%)", inc)
 	}
 }

@@ -110,9 +110,6 @@ const (
 	// For stalling fast producers
 	stallClientMinDuration = 100 * time.Millisecond
 	stallClientMaxDuration = time.Second
-
-	// Threshold for not knowingly doing a potential blocking operation when internal and on a route or gateway or leafnode.
-	noBlockThresh = 500 * time.Millisecond
 )
 
 var readLoopReportThreshold = readLoopReport
@@ -253,7 +250,9 @@ type client struct {
 	ping       pinfo
 	msgb       [msgScratchSize]byte
 	last       time.Time
-	headers    bool
+	lastIn     time.Time
+
+	headers bool
 
 	rtt      time.Duration
 	rttStart time.Time
@@ -286,9 +285,8 @@ type rrTracking struct {
 
 // Struct for PING initiation from the server.
 type pinfo struct {
-	tmr  *time.Timer
-	last time.Time
-	out  int
+	tmr *time.Timer
+	out int
 }
 
 // outbound holds pending data for a socket.
@@ -304,12 +302,20 @@ type outbound struct {
 	stc chan struct{} // Stall chan we create to slow down producers on overrun, e.g. fan-in.
 }
 
-const nbPoolSizeSmall = 4096  // Underlying array size of small buffer
+const nbPoolSizeSmall = 512   // Underlying array size of small buffer
+const nbPoolSizeMedium = 4096 // Underlying array size of medium buffer
 const nbPoolSizeLarge = 65536 // Underlying array size of large buffer
 
 var nbPoolSmall = &sync.Pool{
 	New: func() any {
 		b := [nbPoolSizeSmall]byte{}
+		return &b
+	},
+}
+
+var nbPoolMedium = &sync.Pool{
+	New: func() any {
+		b := [nbPoolSizeMedium]byte{}
 		return &b
 	},
 }
@@ -321,11 +327,25 @@ var nbPoolLarge = &sync.Pool{
 	},
 }
 
+func nbPoolGet(sz int) []byte {
+	switch {
+	case sz <= nbPoolSizeSmall:
+		return nbPoolSmall.Get().(*[nbPoolSizeSmall]byte)[:0]
+	case sz <= nbPoolSizeMedium:
+		return nbPoolMedium.Get().(*[nbPoolSizeMedium]byte)[:0]
+	default:
+		return nbPoolLarge.Get().(*[nbPoolSizeLarge]byte)[:0]
+	}
+}
+
 func nbPoolPut(b []byte) {
 	switch cap(b) {
 	case nbPoolSizeSmall:
 		b := (*[nbPoolSizeSmall]byte)(b[0:nbPoolSizeSmall])
 		nbPoolSmall.Put(b)
+	case nbPoolSizeMedium:
+		b := (*[nbPoolSizeMedium]byte)(b[0:nbPoolSizeMedium])
+		nbPoolMedium.Put(b)
 	case nbPoolSizeLarge:
 		b := (*[nbPoolSizeLarge]byte)(b[0:nbPoolSizeLarge])
 		nbPoolLarge.Put(b)
@@ -1124,7 +1144,7 @@ func (c *client) writeLoop() {
 // sent to during processing. We pass in a budget as a time.Duration
 // for how much time to spend in place flushing for this client.
 func (c *client) flushClients(budget time.Duration) time.Time {
-	last := time.Now().UTC()
+	last := time.Now()
 
 	// Check pending clients for flush.
 	for cp := range c.pcd {
@@ -1307,8 +1327,10 @@ func (c *client) readLoop(pre []byte) {
 		c.mu.Lock()
 
 		// Activity based on interest changes or data/msgs.
+		// Also update last receive activity for ping sender
 		if c.in.msgs > 0 || c.in.subs > 0 {
 			c.last = last
+			c.lastIn = last
 		}
 
 		if n >= cap(b) {
@@ -1420,7 +1442,8 @@ func (c *client) flushOutbound() bool {
 	// "nb" will be reset back to its starting position so it can be modified
 	// safely by queueOutbound calls.
 	c.out.wnb = append(c.out.wnb, collapsed...)
-	orig := append(net.Buffers{}, c.out.wnb...)
+	var _orig [1024][]byte
+	orig := append(_orig[:0], c.out.wnb...)
 	c.out.nb = c.out.nb[:0]
 
 	// Since WriteTo is lopping things off the beginning, we need to remember
@@ -1481,7 +1504,7 @@ func (c *client) flushOutbound() bool {
 	if err != nil && err != io.ErrShortWrite {
 		// Handle timeout error (slow consumer) differently
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
-			if closed := c.handleWriteTimeout(n, attempted, len(c.out.nb)); closed {
+			if closed := c.handleWriteTimeout(n, attempted, len(orig)); closed {
 				return true
 			}
 		} else {
@@ -2033,24 +2056,10 @@ func (c *client) queueOutbound(data []byte) {
 	// in fixed size chunks. This ensures we don't go over the capacity of any
 	// of the buffers and end up reallocating.
 	for len(toBuffer) > 0 {
-		var new []byte
-		if len(c.out.nb) == 0 && len(toBuffer) <= nbPoolSizeSmall {
-			// If the buffer is empty, try to allocate a small buffer if the
-			// message will fit in it. This will help for cases like pings.
-			new = nbPoolSmall.Get().(*[nbPoolSizeSmall]byte)[:0]
-		} else {
-			// If "nb" isn't empty, default to large buffers in all cases as
-			// this means we are always coalescing future messages into
-			// larger buffers. Reduces the number of buffers into writev.
-			new = nbPoolLarge.Get().(*[nbPoolSizeLarge]byte)[:0]
-		}
-		l := len(toBuffer)
-		if c := cap(new); l > c {
-			l = c
-		}
-		new = append(new, toBuffer[:l]...)
-		c.out.nb = append(c.out.nb, new)
-		toBuffer = toBuffer[l:]
+		new := nbPoolGet(len(toBuffer))
+		n := copy(new[:cap(new)], toBuffer)
+		c.out.nb = append(c.out.nb, new[:n])
+		toBuffer = toBuffer[n:]
 	}
 
 	// Check for slow consumer via pending bytes limit.
@@ -2196,7 +2205,7 @@ func (c *client) processPing() {
 
 	// Record this to suppress us sending one if this
 	// is within a given time interval for activity.
-	c.ping.last = time.Now()
+	c.lastIn = time.Now()
 
 	// If not a CLIENT, we are done. Also the CONNECT should
 	// have been received, but make sure it is so before proceeding
@@ -2551,7 +2560,7 @@ func (c *client) processSubEx(subject, queue, bsid []byte, cb msgHandler, noForw
 		}
 	}
 	// Now check on leafnode updates.
-	srv.updateLeafNodes(acc, sub, 1)
+	acc.updateLeafNodes(sub, 1)
 	return sub, nil
 }
 
@@ -2850,7 +2859,7 @@ func (c *client) unsubscribe(acc *Account, sub *subscription, force, remove bool
 			}
 		}
 		// Now check on leafnode updates.
-		c.srv.updateLeafNodes(nsub.im.acc, nsub, -1)
+		nsub.im.acc.updateLeafNodes(nsub, -1)
 	}
 
 	// Now check to see if this was part of a respMap entry for service imports.
@@ -2914,7 +2923,7 @@ func (c *client) processUnsub(arg []byte) error {
 			}
 		}
 		// Now check on leafnode updates.
-		srv.updateLeafNodes(acc, sub, -1)
+		acc.updateLeafNodes(sub, -1)
 	}
 
 	return nil
@@ -3097,9 +3106,11 @@ var needFlush = struct{}{}
 // deliverMsg will deliver a message to a matching subscription and its underlying client.
 // We process all connection/client types. mh is the part that will be protocol/client specific.
 func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, subject, reply, mh, msg []byte, gwrply bool) bool {
-	if sub.client == nil {
+	// Check sub client and check echo
+	if sub.client == nil || c == sub.client && !sub.client.echo {
 		return false
 	}
+
 	client := sub.client
 	client.mu.Lock()
 
@@ -4151,7 +4162,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 	// delivery subject for clients
 	var dsubj []byte
 	// Used as scratch if mapping
-	var _dsubj [64]byte
+	var _dsubj [128]byte
 
 	// For stats, we will keep track of the number of messages that have been
 	// delivered and then multiply by the size of that message and update
@@ -4564,17 +4575,14 @@ func (c *client) processPingTimer() {
 	now := time.Now()
 	needRTT := c.rtt == 0 || now.Sub(c.rttStart) > DEFAULT_RTT_MEASUREMENT_INTERVAL
 
-	// Do not delay PINGs for GATEWAY or spoke LEAF connections.
-	if c.kind == GATEWAY || c.isSpokeLeafNode() {
+	// Do not delay PINGs for ROUTER, GATEWAY or spoke LEAF connections.
+	if c.kind == ROUTER || c.kind == GATEWAY || c.isSpokeLeafNode() {
 		sendPing = true
 	} else {
-		// If we have had activity within the PingInterval then
-		// there is no need to send a ping. This can be client data
-		// or if we received a ping from the other side.
-		if delta := now.Sub(c.last); delta < pingInterval && !needRTT {
-			c.Debugf("Delaying PING due to client activity %v ago", delta.Round(time.Second))
-		} else if delta := now.Sub(c.ping.last); delta < pingInterval && !needRTT {
-			c.Debugf("Delaying PING due to remote ping %v ago", delta.Round(time.Second))
+		// If we received client data or a ping from the other side within the PingInterval,
+		// then there is no need to send a ping.
+		if delta := now.Sub(c.lastIn); delta < pingInterval && !needRTT {
+			c.Debugf("Delaying PING due to remote client data or ping %v ago", delta.Round(time.Second))
 		} else {
 			sendPing = true
 		}
@@ -4724,12 +4732,19 @@ func (c *client) kindString() string {
 // an older one.
 func (c *client) swapAccountAfterReload() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.srv == nil {
+	srv := c.srv
+	an := c.acc.GetName()
+	c.mu.Unlock()
+	if srv == nil {
 		return
 	}
-	acc, _ := c.srv.LookupAccount(c.acc.Name)
-	c.acc = acc
+	if acc, _ := srv.LookupAccount(an); acc != nil {
+		c.mu.Lock()
+		if c.acc != acc {
+			c.acc = acc
+		}
+		c.mu.Unlock()
+	}
 }
 
 // processSubsOnConfigReload removes any subscriptions the client has that are no
@@ -4896,7 +4911,7 @@ func (c *client) closeConnection(reason ClosedState) {
 							srv.gatewayUpdateSubInterest(acc.Name, sub, -1)
 						}
 					}
-					srv.updateLeafNodes(acc, sub, -1)
+					acc.updateLeafNodes(sub, -1)
 				} else {
 					// We handle queue subscribers special in case we
 					// have a bunch we can just send one update to the
@@ -4921,7 +4936,7 @@ func (c *client) closeConnection(reason ClosedState) {
 						srv.gatewayUpdateSubInterest(acc.Name, esub.sub, -(esub.n))
 					}
 				}
-				srv.updateLeafNodes(acc, esub.sub, -(esub.n))
+				acc.updateLeafNodes(esub.sub, -(esub.n))
 			}
 			if prev := acc.removeClient(c); prev == 1 {
 				srv.decActiveAccounts()
@@ -5308,20 +5323,28 @@ func (c *client) doTLSHandshake(typ string, solicit bool, url *url.URL, tlsConfi
 	return false, err
 }
 
-// getRAwAuthUser returns the raw auth user for the client.
+// getRawAuthUserLock returns the raw auth user for the client.
+// Will acquire the client lock.
+func (c *client) getRawAuthUserLock() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.getRawAuthUser()
+}
+
+// getRawAuthUser returns the raw auth user for the client.
 // Lock should be held.
 func (c *client) getRawAuthUser() string {
 	switch {
-	case c.opts.Nkey != "":
+	case c.opts.Nkey != _EMPTY_:
 		return c.opts.Nkey
-	case c.opts.Username != "":
+	case c.opts.Username != _EMPTY_:
 		return c.opts.Username
-	case c.opts.JWT != "":
+	case c.opts.JWT != _EMPTY_:
 		return c.pubKey
-	case c.opts.Token != "":
+	case c.opts.Token != _EMPTY_:
 		return c.opts.Token
 	default:
-		return ""
+		return _EMPTY_
 	}
 }
 
@@ -5329,11 +5352,11 @@ func (c *client) getRawAuthUser() string {
 // Lock should be held.
 func (c *client) getAuthUser() string {
 	switch {
-	case c.opts.Nkey != "":
+	case c.opts.Nkey != _EMPTY_:
 		return fmt.Sprintf("Nkey %q", c.opts.Nkey)
-	case c.opts.Username != "":
+	case c.opts.Username != _EMPTY_:
 		return fmt.Sprintf("User %q", c.opts.Username)
-	case c.opts.JWT != "":
+	case c.opts.JWT != _EMPTY_:
 		return fmt.Sprintf("JWT User %q", c.pubKey)
 	default:
 		return `User "N/A"`

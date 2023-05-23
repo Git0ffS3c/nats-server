@@ -1268,6 +1268,13 @@ func (s *Server) remoteServerUpdate(sub *subscription, c *client, _ *Account, su
 	}
 	si := ssm.Server
 
+	// Should do normal updates before bailing if wrong domain.
+	s.mu.Lock()
+	if s.running && s.eventsEnabled() && ssm.Server.ID != s.info.ID {
+		s.updateRemoteServer(&si)
+	}
+	s.mu.Unlock()
+
 	// JetStream node updates.
 	if !s.sameDomain(si.Domain) {
 		return
@@ -1293,11 +1300,6 @@ func (s *Server) remoteServerUpdate(sub *subscription, c *client, _ *Account, su
 		stats,
 		false, si.JetStream,
 	})
-	s.mu.Lock()
-	if s.running && s.eventsEnabled() && ssm.Server.ID != s.info.ID {
-		s.updateRemoteServer(&si)
-	}
-	s.mu.Unlock()
 }
 
 // updateRemoteServer is called when we have an update from a remote server.
@@ -1717,7 +1719,7 @@ func (s *Server) remoteConnsUpdate(sub *subscription, c *client, _ *Account, sub
 
 // This will import any system level exports.
 func (s *Server) registerSystemImports(a *Account) {
-	if a == nil || !s.eventsEnabled() {
+	if a == nil || !s.EventsEnabled() {
 		return
 	}
 	sacc := s.SystemAccount()
@@ -2126,7 +2128,7 @@ func (s *Server) remoteLatencyUpdate(sub *subscription, _ *client, _ *Account, s
 	if !s.eventsRunning() {
 		return
 	}
-	rl := remoteLatency{}
+	var rl remoteLatency
 	if err := json.Unmarshal(msg, &rl); err != nil {
 		s.Errorf("Error unmarshalling remote latency measurement: %v", err)
 		return
@@ -2148,25 +2150,21 @@ func (s *Server) remoteLatencyUpdate(sub *subscription, _ *client, _ *Account, s
 		acc.mu.RUnlock()
 		return
 	}
-	m1 := si.m1
-	m2 := rl.M2
-
 	lsub := si.latency.subject
 	acc.mu.RUnlock()
 
+	si.acc.mu.Lock()
+	m1 := si.m1
+	m2 := rl.M2
+
 	// So we have not processed the response tracking measurement yet.
 	if m1 == nil {
-		si.acc.mu.Lock()
-		// Double check since could have slipped in.
-		m1 = si.m1
-		if m1 == nil {
-			// Store our value there for them to pick up.
-			si.m1 = &m2
-		}
-		si.acc.mu.Unlock()
-		if m1 == nil {
-			return
-		}
+		// Store our value there for them to pick up.
+		si.m1 = &m2
+	}
+	si.acc.mu.Unlock()
+	if m1 == nil {
+		return
 	}
 
 	// Calculate the correct latencies given M1 and M2.
